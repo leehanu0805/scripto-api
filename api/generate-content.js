@@ -1,7 +1,6 @@
 // api/generate-content.js — Vercel Serverless Function (CommonJS)
 // 성공: 200 { result: "..." } / 실패: 4xx~5xx { error: "..." }
-// 안전판: 멀티라인 문자열은 전부 배열+join("
-") 사용 (백틱/정규식/replaceAll 안 씀)
+// 안전판: 멀티라인 문자열은 전부 배열+join("\\n") 사용 (백틱/정규식/replaceAll 안 씀)
 
 "use strict";
 
@@ -127,8 +126,7 @@ module.exports = async (req, res) => {
     let buf = "";
     for (let i = 0; i < norm.length; i++) {
       const code = norm.charCodeAt(i);
-      if (code === 10) { // 
-
+      if (code === 10) { // LF
         const trimmed = buf.trim();
         if (trimmed) arr.push(trimmed);
         buf = "";
@@ -177,8 +175,7 @@ module.exports = async (req, res) => {
       const parts = l.split(" ").filter(Boolean);
       out.push(parts.length <= MAX ? l : parts.slice(0, MAX).join(" "));
     }
-    return out.join("
-");
+    return out.join("\n");
   }
 
   function round1(n) { return Math.round(n * 10) / 10; }
@@ -237,8 +234,7 @@ module.exports = async (req, res) => {
         }
       }
 
-      return out.join("
-");
+      return out.join("\n");
     } catch (e) {
       return script;
     }
@@ -249,36 +245,30 @@ module.exports = async (req, res) => {
     meme: [
       "EXAMPLE (meme, 25s): [HOOK] POV you still edit 1-by-1",
       "setup->twist->tag. 3-5 beats. One punchline."
-    ].join("
-"),
+    ].join("\n"),
     quicktip: [
       "EXAMPLE (quicktip, 30s): [HOOK] Batch film = 3x output",
       "1) Script bullets only.",
       "2) Lock exposure.",
       "3) A-roll then B-roll.",
       "[CTA] Comment \"GEAR\"."
-    ].join("
-"),
+    ].join("\n"),
     challenge: [
       "EXAMPLE (challenge, 30s): [HOOK] 10 pushups every missed beat",
       "premise->rules->attempt->result. Present tense. One suspense beat."
-    ].join("
-"),
+    ].join("\n"),
     storytelling: [
       "EXAMPLE (storytelling, 45s): [HOOK] Missed the midnight train",
       "incident->complication->turn->button. Vivid verbs."
-    ].join("
-"),
+    ].join("\n"),
     productplug: [
       "EXAMPLE (productplug, 35s): [HOOK] Editing took me 3 hours",
       "problem->product->proof->how-to->CTA. No hype words."
-    ].join("
-"),
+    ].join("\n"),
     faceless: [
       "EXAMPLE (faceless, 30s): [HOOK] Stop wasting your B-roll",
       "voiceover-only, short lines, no camera directions."
-    ].join("
-")
+    ].join("\n")
   };
   const styleKey = String(style || "").toLowerCase();
   const styleHint = styleExamples[styleKey] || "";
@@ -316,37 +306,22 @@ module.exports = async (req, res) => {
     "- faceless: voiceover-only; short lines; no camera directions.",
     "",
     styleHint
-  ].join("
-");
+  ].join("\n");
 
   // ---------- User prompt (string concat) ----------
   const user =
-    "TOPIC: " + text + "
-" +
-    "STYLE: " + style + "
-" +
-    "TONE: " + tone + "
-" +
-    "LANGUAGE: " + language + "
-" +
-    "TARGET_DURATION_SECONDS: " + sec + "
-" +
-    "TARGET_WORDS_SOFT_CAP: " + wordsTarget + "
-" +
-    "CTA: " + (ctaInclusion ? "Yes" : "No") + "
-" +
-    "KEYWORDS (must appear >=1 time): " + (String(text).indexOf(",") >= 0 ? text : "N/A") + "
-
-" +
-    "CONSTRAINTS:
-" +
-    "- Mention TOPIC explicitly within first 2 lines.
-" +
-    "- Structure: [HOOK] -> 5–7 body lines -> optional [CTA].
-" +
-    "- Prefer specifics over adjectives.
-
-" +
+    "TOPIC: " + text + "\n" +
+    "STYLE: " + style + "\n" +
+    "TONE: " + tone + "\n" +
+    "LANGUAGE: " + language + "\n" +
+    "TARGET_DURATION_SECONDS: " + sec + "\n" +
+    "TARGET_WORDS_SOFT_CAP: " + wordsTarget + "\n" +
+    "CTA: " + (ctaInclusion ? "Yes" : "No") + "\n" +
+    "KEYWORDS (must appear >=1 time): " + (String(text).indexOf(",") >= 0 ? text : "N/A") + "\n\n" +
+    "CONSTRAINTS:\n" +
+    "- Mention TOPIC explicitly within first 2 lines.\n" +
+    "- Structure: [HOOK] -> 5–7 body lines -> optional [CTA].\n" +
+    "- Prefer specifics over adjectives.\n\n" +
     "Write the final script now.";
 
   // ---------- OpenAI Call ----------
