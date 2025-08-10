@@ -141,8 +141,12 @@ OUTPUT FORMAT (STRICT)
 
 TIMING RULES
 - Time ranges must be contiguous and non-overlapping: next start == previous end.
-- The final end must be ≤ TARGET_DURATION_SECONDS.
-- Suggested allocation: HOOK ≈ 12–20% of total; split the remainder evenly across body lines; CTA ≤ 10% if present.
+- The final end must be exactly ≤ TARGET_DURATION_SECONDS (prefer exact equality if possible).
+- Suggested allocation: HOOK ≈ 12–20% of total; distribute remainder across body lines; CTA ≤ 10% if present.
+
+LENGTH ALIGNMENT
+- Keep total words near TARGET_WORDS_SOFT_CAP; distribute words roughly proportional to each segment's duration.
+- Shorter segments must have fewer words; longer segments may have more words, but still ≤ 16 words per line.
 
 STYLE PACKS
 - meme: setup→twist→tag; 3–5 beats; internet slang ok.
@@ -172,7 +176,57 @@ CONSTRAINTS:
 
 Write the final script now.`;
 
-  // ---------- OpenAI Call ----------
+  // ---------- Retiming utility (no-regex) ----------
+function round1(n){ return Math.round(n*10)/10 }
+function isKo(lang){ const s=String(lang||"").toLowerCase(); return s.includes("ko") || s.includes("korean") || s.includes("한국") }
+function estWords(line, lang){
+  let txt = String(line||"").replace("[HOOK]","").replace("[CTA]","").trim();
+  if (!txt) return 1;
+  if (isKo(lang)) { return txt.split(" ").filter(Boolean).length; }
+  const l = txt.split(" ").join("").length; // rough for CJK
+  return Math.max(1, txt.split(" ").filter(Boolean).length || Math.round(l/2));
+}
+function stripTime(line){
+  const s = String(line||"").trim();
+  if (s.startsWith("[") && s.indexOf("]")>2){
+    const b = s.indexOf("]");
+    const body = s.slice(b+1).trim();
+    return { text: body };
+  }
+  return { text: s };
+}
+function retimeScript(script, totalSec, lang){
+  try{
+    const T = Math.max(1, round1(Number(totalSec)||0));
+    const raw = String(script||"").split("
+").map(x=>x.trim()).filter(Boolean);
+    if (!raw.length) return script;
+    const items = raw.map(l=>{ const x=stripTime(l); return { text: x.text, isHook: x.text.includes("[HOOK]"), isCTA: x.text.includes("[CTA]") }; });
+    if (!items[0].isHook){ items[0].text = "[HOOK] "+items[0].text.replace("[HOOK] ",""); items[0].isHook=true; }
+    const ctaIdx = items.findIndex(it=>it.isCTA);
+    const weights = items.map(it=> Math.max(1, estWords(it.text, lang)));
+    let sumW = weights.reduce((a,b)=>a+b,0) || items.length;
+    let durs = weights.map(w => (w/sumW)*T);
+    const minHook=0.12*T, maxHook=0.20*T;
+    durs[0] = Math.min(maxHook, Math.max(minHook, durs[0]));
+    if (ctaIdx>=0) durs[ctaIdx] = Math.min(durs[ctaIdx], 0.10*T);
+    const frozen = new Set([0]); if (ctaIdx>=0) frozen.add(ctaIdx);
+    const frozenSum = Array.from(frozen).reduce((s,i)=>s+durs[i],0);
+    const freeIdxs = items.map((_,i)=>i).filter(i=>!frozen.has(i));
+    const freeSum = freeIdxs.reduce((s,i)=>s+durs[i],0) || 1;
+    const scale = Math.max(0.0001, (T - frozenSum)/freeSum);
+    freeIdxs.forEach(i=> durs[i]*=scale);
+    const out=[]; let cur=0;
+    for (let i=0;i<items.length;i++){
+      if (i===items.length-1){ const start=round1(cur); const end=round1(T); out.push(`[${start}-${end}] ${items[i].text}`); break; }
+      const start=round1(cur); let end=round1(cur + durs[i]); if (end>=T) end=round1(Math.max(start+0.1, T-0.1)); out.push(`[${start}-${end}] ${items[i].text}`); cur=end;
+    }
+    return out.join("
+");
+  }catch(e){ return script; }
+}
+
+// ---------- OpenAI Call ----------
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HARD_TIMEOUT_MS);
 
@@ -208,13 +262,15 @@ Write the final script now.`;
     const data = await r.json();
     const draft = data?.choices?.[0]?.message?.content?.trim() || "";
 
-    if (!draft) {
-      clearTimeout(timer);
-      return res.status(502).json({ error: "Empty response from model" });
-    }
+if (!draft) {
+  clearTimeout(timer);
+  return res.status(502).json({ error: "Empty response from model" });
+}
 
-    clearTimeout(timer);
-    return res.status(200).json({ result: draft });
+const retimed = retimeScript(draft, sec, language);
+
+clearTimeout(timer);
+return res.status(200).json({ result: retimed });
   } catch (e) {
     const msg = e?.stack || e?.message || String(e);
     console.error("[Server error]", msg);
