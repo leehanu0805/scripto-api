@@ -55,10 +55,23 @@ module.exports = async (req, res) => {
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini"; // 기본 미니
   const HARD_TIMEOUT_MS = Math.max(15_000, Math.min(Number(process.env.HARD_TIMEOUT_MS) || 30_000, 120_000));
+  const DEBUG_ERRORS = process.env.DEBUG_ERRORS === '1' || process.env.DEBUG_ERRORS === 'true';
 
   if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
 
   // ---------- Input ----------
+  // req.body가 프레임워크에 따라 string/object일 수 있으니 안전 파싱
+  async function readJsonBody(req) {
+    if (req.body && typeof req.body === 'object') return req.body;
+    if (typeof req.body === 'string' && req.body.length) {
+      try { return JSON.parse(req.body); } catch { /* ignore */ }
+    }
+    let raw = '';
+    await new Promise((resolve) => { req.on('data', c => raw += c); req.on('end', resolve); });
+    try { return JSON.parse(raw || '{}'); } catch { return {}; }
+  }
+
+  const body = await readJsonBody(req);
   const {
     text,
     style,
@@ -66,7 +79,7 @@ module.exports = async (req, res) => {
     tone = "Neutral",
     language = "English",
     ctaInclusion = false,
-  } = req.body || {};
+  } = body || {};
 
   if (!text || typeof text !== "string") return res.status(400).json({ error: "`text` is required" });
   if (!style || typeof style !== "string") return res.status(400).json({ error: "`style` is required" });
@@ -193,9 +206,10 @@ Write the final script now.`;
     clearTimeout(timer);
     return res.status(200).json({ result: draft });
   } catch (e) {
-    console.error("[Server error]", e?.message || e);
+    const msg = e?.stack || e?.message || e;
+    console.error("[Server error]", msg);
     if (e && e.name === "AbortError") return res.status(504).json({ error: "Upstream timeout" });
-    return res.status(500).json({ error: (e && e.message) || "Server error" });
+    return res.status(500).json({ error: DEBUG_ERRORS ? String(msg) : ((e && e.message) || "Server error") });
   } finally {
     clearTimeout(timer);
   }
