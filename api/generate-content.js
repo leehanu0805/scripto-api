@@ -199,11 +199,11 @@ function retimeScript(script, totalSec, lang){
   try{
     const T = Math.max(1, round1(Number(totalSec)||0));
     const raw = String(script || "")
-      .replace(/
-/g, "
+      .replaceAll("
+", "
 ")
-      .replace(/
-/g, "
+      .replaceAll("
+", "
 ")
       .split("
 ")
