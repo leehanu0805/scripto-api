@@ -1,13 +1,7 @@
-// api/generate-content.js — Vercel Serverless Function (Node.js, CommonJS)
-// 성공 시 { result: "..." } 반환, 실패 시 상태코드와 { error: "..." } 반환 (풀백 없음)
+// api/generate-content.js — Vercel Serverless Function (CommonJS)
+// 성공 시 { result: "..." } / 실패 시 { error: "..." } (풀백 없음)
 
 module.exports = async (req, res) => {
-  // ensure fetch exists on older Node runtimes (Node <18)
-  if (typeof fetch !== "function") {
-    const { default: fetchFn } = await import("node-fetch");
-    globalThis.fetch = fetchFn;
-  }
-  console.log("[dbg] node", process.version);
   // ---------- CORS (화이트리스트 + 경로 제거 + 캐시 헤더) ----------
   const rawList =
     process.env.ALLOWED_ORIGINS /* "https://scripto.framer.website,https://scripto.framer.app" */ ||
@@ -16,20 +10,30 @@ module.exports = async (req, res) => {
 
   const ALLOW_LIST = rawList
     .split(",")
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean)
-    .map(v => { try { return new URL(v).origin } catch { return v } });
+    .map((v) => {
+      try {
+        return new URL(v).origin;
+      } catch {
+        return v;
+      }
+    });
 
   const requestOrigin = (() => {
     const o = req.headers.origin;
     if (!o) return null;
-    try { return new URL(o).origin } catch { return o }
+    try {
+      return new URL(o).origin;
+    } catch {
+      return o;
+    }
   })();
 
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Max-Age", "600"); // preflight 10분 캐시
+  res.setHeader("Access-Control-Max-Age", "600"); // preflight 10분
 
   const allowAll = ALLOW_LIST.includes("*");
   const allowThis =
@@ -54,21 +58,34 @@ module.exports = async (req, res) => {
   // ---------- Config ----------
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini"; // 기본 미니
-  const HARD_TIMEOUT_MS = Math.max(15_000, Math.min(Number(process.env.HARD_TIMEOUT_MS) || 30_000, 120_000));
-  const DEBUG_ERRORS = process.env.DEBUG_ERRORS === '1' || process.env.DEBUG_ERRORS === 'true';
+  const HARD_TIMEOUT_MS = Math.max(
+    15_000,
+    Math.min(Number(process.env.HARD_TIMEOUT_MS) || 30_000, 120_000)
+  );
+  const DEBUG_ERRORS =
+    process.env.DEBUG_ERRORS === "1" || process.env.DEBUG_ERRORS === "true";
 
-  if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+  if (!OPENAI_API_KEY)
+    return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
 
-  // ---------- Input ----------
-  // req.body가 프레임워크에 따라 string/object일 수 있으니 안전 파싱
+  // ---------- Body safe-parse ----------
   async function readJsonBody(req) {
-    if (req.body && typeof req.body === 'object') return req.body;
-    if (typeof req.body === 'string' && req.body.length) {
-      try { return JSON.parse(req.body); } catch { /* ignore */ }
+    if (req.body && typeof req.body === "object") return req.body;
+    if (typeof req.body === "string" && req.body.length) {
+      try {
+        return JSON.parse(req.body);
+      } catch {}
     }
-    let raw = '';
-    await new Promise((resolve) => { req.on('data', c => raw += c); req.on('end', resolve); });
-    try { return JSON.parse(raw || '{}'); } catch { return {}; }
+    let raw = "";
+    await new Promise((resolve) => {
+      req.on("data", (c) => (raw += c));
+      req.on("end", resolve);
+    });
+    try {
+      return JSON.parse(raw || "{}");
+    } catch {
+      return {};
+    }
   }
 
   const body = await readJsonBody(req);
@@ -81,11 +98,13 @@ module.exports = async (req, res) => {
     ctaInclusion = false,
   } = body || {};
 
-  if (!text || typeof text !== "string") return res.status(400).json({ error: "`text` is required" });
-  if (!style || typeof style !== "string") return res.status(400).json({ error: "`style` is required" });
+  if (!text || typeof text !== "string")
+    return res.status(400).json({ error: "`text` is required" });
+  if (!style || typeof style !== "string")
+    return res.status(400).json({ error: "`style` is required" });
 
   const sec = Math.max(15, Math.min(Number(length) || 45, 180));
-  const wordsTarget = Math.round(sec * 2.2);
+  const wordsTarget = Math.round(sec * 2.2); // 1s ≈ 2.2 words
 
   // ---------- Style examples & safe hint ----------
   const styleExamples = {
@@ -109,14 +128,13 @@ incident→complication→turn→button. Vivid verbs.',
 problem→product→proof→how-to→CTA. No hype words.',
     faceless:
       'EXAMPLE (faceless, 30s): [HOOK] Stop wasting your B-roll
-voiceover-only, short lines, no camera directions.'
+voiceover-only, short lines, no camera directions.',
   };
   const styleKey = String(style || "").toLowerCase();
   const styleHint = styleExamples[styleKey] || "";
 
   // ---------- Prompt with timing + HOOK ----------
-  const sys =
-`You are a short-form video scriptwriter for TikTok/Reels/Shorts.
+  const sys = `You are a short-form video scriptwriter for TikTok/Reels/Shorts.
 Always write in the requested LANGUAGE. Return only the script text—no JSON/markdown/disclaimers.
 Keep pacing for TARGET_DURATION_SECONDS and roughly TARGET_WORDS_SOFT_CAP words.
 
@@ -144,8 +162,7 @@ ${styleHint}`.trim();
 
   const keywordsCSV = String(text).includes(",") ? text : "";
 
-  const user =
-`TOPIC: ${text}
+  const user = `TOPIC: ${text}
 STYLE: ${style}
 TONE: ${tone}
 LANGUAGE: ${language}
@@ -165,22 +182,18 @@ Write the final script now.`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HARD_TIMEOUT_MS);
 
-  // 디버그 로그 (필요시 확인)
-  console.log("[dbg] model:", OPENAI_MODEL, "hasKey:", !!OPENAI_API_KEY);
-  console.log("[dbg] inputs:", { text: String(text).slice(0, 80), style, sec });
-
   try {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: OPENAI_MODEL,
+        model: OPENAI_MODEL, // gpt-4o-mini by default
         temperature: 0.4,
         top_p: 0.9,
-        max_tokens: 512, // 과출력 방지 및 안정성
+        max_tokens: 512,
         messages: [
           { role: "system", content: sys },
           { role: "user", content: user },
@@ -192,7 +205,10 @@ Write the final script now.`;
     if (!r.ok) {
       const err = await r.text().catch(() => "");
       console.error("[OpenAI error]", r.status, err.slice(0, 300));
-      return res.status(r.status).json({ error: `OpenAI ${r.status}: ${err}` });
+      clearTimeout(timer);
+      return res
+        .status(r.status)
+        .json({ error: `OpenAI ${r.status}: ${err}` });
     }
 
     const data = await r.json();
@@ -206,10 +222,13 @@ Write the final script now.`;
     clearTimeout(timer);
     return res.status(200).json({ result: draft });
   } catch (e) {
-    const msg = e?.stack || e?.message || e;
+    const msg = e?.stack || e?.message || String(e);
     console.error("[Server error]", msg);
-    if (e && e.name === "AbortError") return res.status(504).json({ error: "Upstream timeout" });
-    return res.status(500).json({ error: DEBUG_ERRORS ? String(msg) : ((e && e.message) || "Server error") });
+    if (e && e.name === "AbortError")
+      return res.status(504).json({ error: "Upstream timeout" });
+    return res
+      .status(500)
+      .json({ error: DEBUG_ERRORS ? String(msg) : "Server error" });
   } finally {
     clearTimeout(timer);
   }
