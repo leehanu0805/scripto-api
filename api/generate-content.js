@@ -2,6 +2,12 @@
 // 성공 시 { result: "..." } 반환, 실패 시 상태코드와 { error: "..." } 반환 (풀백 없음)
 
 module.exports = async (req, res) => {
+  // ensure fetch exists on older Node runtimes (Node <18)
+  if (typeof fetch !== "function") {
+    const { default: fetchFn } = await import("node-fetch");
+    globalThis.fetch = fetchFn;
+  }
+  console.log("[dbg] node", process.version);
   // ---------- CORS (화이트리스트 + 경로 제거 + 캐시 헤더) ----------
   const rawList =
     process.env.ALLOWED_ORIGINS /* "https://scripto.framer.website,https://scripto.framer.app" */ ||
