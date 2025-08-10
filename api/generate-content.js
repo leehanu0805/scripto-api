@@ -108,28 +108,22 @@ module.exports = async (req, res) => {
 
   // ---------- Style examples & safe hint ----------
   const styleExamples = {
-    meme:
-      'EXAMPLE (meme, 25s): [HOOK] POV you still edit 1-by-1
-setup→twist→tag. 3–5 beats. One punchline.',
-    quicktip:
-      'EXAMPLE (quicktip, 30s): [HOOK] Batch film = 3x output
+  meme: `EXAMPLE (meme, 25s): [HOOK] POV you still edit 1-by-1
+setup→twist→tag. 3–5 beats. One punchline.`,
+  quicktip: `EXAMPLE (quicktip, 30s): [HOOK] Batch film = 3x output
 1) Script bullets only.
 2) Lock exposure.
 3) A-roll then B-roll.
-[CTA] Comment "GEAR".',
-    challenge:
-      'EXAMPLE (challenge, 30s): [HOOK] 10 pushups every missed beat
-premise→rules→attempt→result. Present tense. One suspense beat.',
-    storytelling:
-      'EXAMPLE (storytelling, 45s): [HOOK] Missed the midnight train
-incident→complication→turn→button. Vivid verbs.',
-    productplug:
-      'EXAMPLE (productplug, 35s): [HOOK] Editing took me 3 hours
-problem→product→proof→how-to→CTA. No hype words.',
-    faceless:
-      'EXAMPLE (faceless, 30s): [HOOK] Stop wasting your B-roll
-voiceover-only, short lines, no camera directions.',
-  };
+[CTA] Comment "GEAR".`,
+  challenge: `EXAMPLE (challenge, 30s): [HOOK] 10 pushups every missed beat
+premise→rules→attempt→result. Present tense. One suspense beat.`,
+  storytelling: `EXAMPLE (storytelling, 45s): [HOOK] Missed the midnight train
+incident→complication→turn→button. Vivid verbs.`,
+  productplug: `EXAMPLE (productplug, 35s): [HOOK] Editing took me 3 hours
+problem→product→proof→how-to→CTA. No hype words.`,
+  faceless: `EXAMPLE (faceless, 30s): [HOOK] Stop wasting your B-roll
+voiceover-only, short lines, no camera directions.`
+};
   const styleKey = String(style || "").toLowerCase();
   const styleHint = styleExamples[styleKey] || "";
 
