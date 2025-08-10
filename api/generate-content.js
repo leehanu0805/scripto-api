@@ -198,8 +198,9 @@ function stripTime(line){
 function retimeScript(script, totalSec, lang){
   try{
     const T = Math.max(1, round1(Number(totalSec)||0));
-    const raw = String(script||"").split("
-").map(x=>x.trim()).filter(Boolean);
+    const raw = String(script||"").split(/
+?
+/).map(x=>x.trim()).filter(Boolean);
     if (!raw.length) return script;
     const items = raw.map(l=>{ const x=stripTime(l); return { text: x.text, isHook: x.text.includes("[HOOK]"), isCTA: x.text.includes("[CTA]") }; });
     if (!items[0].isHook){ items[0].text = "[HOOK] "+items[0].text.replace("[HOOK] ",""); items[0].isHook=true; }
