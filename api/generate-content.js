@@ -196,17 +196,20 @@ function stripTime(line){
   return { text: s };
 }
 function normalizeNewlines(s){
-  const t = String(s || "");
-  let out = "";
+  const t = String(s || '');
+  let out = '';
+  const NL = String.fromCharCode(10);
   for (let i = 0; i < t.length; i++){
-    const ch = t[i];
-    if (ch === "
-"){
-      if (t[i+1] === "
-") i++; // skip CRLF
-      out += "
-";
+    const code = t.charCodeAt(i);
+    if (code === 13){ // CR
+      if (t.charCodeAt(i+1) === 10) i++; // skip CRLF
+      out += NL;
     } else {
+      out += t[i];
+    }
+  }
+  return out;
+} else {
       out += ch;
     }
   }
