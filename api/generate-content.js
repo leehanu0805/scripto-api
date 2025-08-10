@@ -1,38 +1,76 @@
 // Vercel Serverless Function (Node.js 런타임)
-// 응답은 항상 { "result": "..." } 형식
+// ✅ 항상 { result: "..." } 형식으로 응답 (폴백 없음)
 module.exports = async (req, res) => {
-  const origin = process.env.ALLOWED_ORIGIN || req.headers.origin || "*"
+  // ---------- CORS (화이트리스트 + 경로 제거 + 캐시 헤더) ----------
+  const rawList =
+    process.env.ALLOWED_ORIGINS /* "https://scripto.framer.website,https://scripto.framer.app" */ ||
+    process.env.ALLOWED_ORIGIN  /* 과거 단일 키도 지원 */ ||
+    ""
 
-  // CORS
-  res.setHeader("Access-Control-Allow-Origin", origin)
+  const ALLOW_LIST = rawList
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(v => { try { return new URL(v).origin } catch { return v } })
+
+  const requestOrigin = (() => {
+    const o = req.headers.origin
+    if (!o) return null
+    try { return new URL(o).origin } catch { return o }
+  })()
+
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
+  res.setHeader("Vary", "Origin")
+  res.setHeader("Access-Control-Max-Age", "600") // preflight 10분 캐시
+
+  const allowAll = ALLOW_LIST.includes("*")
+  const allowThis =
+    allowAll ||
+    (ALLOW_LIST.length === 0 && !!requestOrigin) ||
+    (requestOrigin && ALLOW_LIST.includes(requestOrigin))
+
+  if (allowAll) {
+    res.setHeader("Access-Control-Allow-Origin", "*")
+  } else if (ALLOW_LIST.length === 0) {
+    res.setHeader("Access-Control-Allow-Origin", requestOrigin || "*")
+  } else if (allowThis && requestOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", requestOrigin)
+  } else {
+    if (req.method === "OPTIONS") return res.status(204).end()
+    return res.status(403).json({ error: "CORS: origin not allowed" })
+  }
 
   if (req.method === "OPTIONS") return res.status(204).end()
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed")
 
+  // ---------- 기본 설정 ----------
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY
-  const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini"
-  if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" })
+  const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini" // ⬅️ 요청대로 '미니' 기본값
+  const HARD_TIMEOUT_MS = Math.max(15_000, Math.min(Number(process.env.HARD_TIMEOUT_MS) || 30_000, 120_000)) // 프론트 30s와 맞춤
 
-  // 요청 바디 (Vercel Node는 JSON 자동 파싱)
+  if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" })) })
+  }
+
+  // ---------- 입력 ----------
   const {
     text,
     style,
     length = 45,
     tone = "Neutral",
-    language = "English",
+    language = "English",   // 프론트 라벨 그대로 받음
     ctaInclusion = false,
-    qualityMode = true // 고퀄 모드(2패스) 기본 ON. 느리면 프론트에서 false로 보내
+    qualityMode = true      // boolean 그대로 유지(기본 true)
   } = req.body || {}
 
-  if (!text || typeof text !== "string") return res.status(400).json({ error: "`text` is required" })
-  if (!style || typeof style !== "string") return res.status(400).json({ error: "`style` is required" })
+  if (!text || typeof text !== "string") return res.status(400).json({ error: "`text` is required" })) })
+  }
+  if (!style || typeof style !== "string") return res.status(400).json({ error: "`style` is required" })) })
+  }
 
   const sec = Math.max(15, Math.min(Number(length) || 45, 180))
   const wordsTarget = Math.round(sec * 2.2) // 1초≈2.2 단어(소프트캡)
 
-  // 스타일별 짧은 예시(톤 고정용, 너무 길면 비용↑이라 1줄씩만)
   const styleExamples = {
     meme:
       'EXAMPLE (meme, 25s): Hook: POV you still edit 1-by-1. Setup→twist→tag. End with 1 punchline.',
@@ -68,7 +106,7 @@ STYLE PACKS
 
 ${styleExamples[(style || '').toLowerCase()] || ''}`.trim()
 
-  // 쉼표 키워드가 있으면 키워드 목록으로 취급(필수 등장 1회)
+  // 쉼표가 있으면 키워드 리스트(필수 1회 등장)
   const keywordsCSV = String(text).includes(",") ? text : ""
 
   const user =
@@ -88,73 +126,79 @@ CONSTRAINTS:
 
 Write the final script now.`
 
-  // 25초 타임아웃
+  // ---------- 유틸 ----------
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 25_000)
+  const timer = setTimeout(() => controller.abort(), HARD_TIMEOUT_MS)
 
-  try {
-    // 1차: 초안 생성
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        temperature: 0.6,
-        top_p: 0.9,
-        messages: [
-          { role: "system", content: sys },
-          { role: "user", content: user },
-        ],
-      }),
-      signal: controller.signal,
+  const callOpenAISafely = async (messages, { tMain = 0.35, tRetry = 0.25 } = {}) => {
+    const url = "https://api.openai.com/v1/chat/completions"
+    const headers = {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+    }
+    const body = (temperature) => JSON.stringify({
+      model: OPENAI_MODEL,
+      temperature,
+      top_p: 0.9,
+      messages,
     })
 
-    if (!r.ok) {
-      const err = await r.text()
-      return res.status(r.status).json({ error: `OpenAI ${r.status}: ${err}` })
+    // 1차 시도
+    try {
+      const r = await fetch(url, { method: "POST", headers, body: body(tMain), signal: controller.signal })
+      if (!r.ok) throw new Error(`OpenAI ${r.status}: ${await r.text().catch(()=> "")}`)
+      const j = await r.json()
+      return (j?.choices?.[0]?.message?.content || "").trim()
+    } catch (e1) {
+      // 2차 가벼운 재시도
+      try {
+        const r2 = await fetch(url, { method: "POST", headers, body: body(tRetry), signal: controller.signal })
+        if (!r2.ok) throw new Error(`OpenAI ${r2.status}: ${await r2.text().catch(()=> "")}`)
+        const j2 = await r2.json()
+        return (j2?.choices?.[0]?.message?.content || "").trim()
+      } catch (e2) {
+        console.error("[OpenAI retry failed]", e1?.message || e1, e2?.message || e2)
+        return null
+      }
     }
+  }
 
-    const data = await r.json()
-    let draft = data?.choices?.[0]?.message?.content?.trim() || "No content generated."
+  try {
+    // 1) 초안 생성
+    let draft = await callOpenAISafely(
+      [
+        { role: "system", content: sys },
+        { role: "user", content: user },
+      ],
+      { tMain: 0.35, tRetry: 0.25 } // 미니 안정 영역
+    )
 
-    // 2차: 퀄리티 모드(자가리뷰→개선본)
-    if (qualityMode) {
+    // 2) 품질모드가 true면 짧게 리터치(실패해도 무시)
+    if (qualityMode && draft) {
       const reviewMsg =
-        "Review the script for: hook strength, specificity, redundancy, pacing. " +
-        "Tighten generic lines, replace vague words with concrete nouns/verbs. " +
-        "Ensure max one CTA line at the end. Return improved script only."
-
-      const r2 = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: OPENAI_MODEL,
-          temperature: 0.6,
-          top_p: 0.9,
-          messages: [
+        "Tighten redundancy; ensure [HOOK] then 3–6 short lines; prefer specifics; return script only."
+      const refined = await callOpenAISafely(
+          [
             { role: "system", content: sys },
             { role: "user", content: user },
             { role: "assistant", content: draft },
             { role: "user", content: reviewMsg },
           ],
-        }),
-        signal: controller.signal,
-      })
-
-      if (r2.ok) {
-        const d2 = await r2.json()
-        draft = d2?.choices?.[0]?.message?.content?.trim() || draft
-      }
+          { tMain: 0.3, tRetry: 0.25 }
+      )
+      if (refined) draft = refined
     }
 
-    return res.status(200).json({ result: draft })
+    // 3) 결과 보정/확정
+    if (draft && typeof draft === "string" && draft.trim().length > 0) {
+      clearTimeout(timer)
+      return res.status(200).json({ result: draft.trim() })
+    }
+    clearTimeout(timer)
+    return res.status(502).json({ error: "Empty response from model" })
+
   } catch (e) {
+    console.error("[Server error]", e?.message || e)
     if (e && e.name === "AbortError") return res.status(504).json({ error: "Upstream timeout" })
     return res.status(500).json({ error: (e && e.message) || "Server error" })
   } finally {
