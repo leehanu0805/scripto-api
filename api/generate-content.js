@@ -195,16 +195,28 @@ function stripTime(line){
   }
   return { text: s };
 }
+function normalizeNewlines(s){
+  const t = String(s || "");
+  let out = "";
+  for (let i = 0; i < t.length; i++){
+    const ch = t[i];
+    if (ch === "
+"){
+      if (t[i+1] === "
+") i++; // skip CRLF
+      out += "
+";
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
 function retimeScript(script, totalSec, lang){
   try{
     const T = Math.max(1, round1(Number(totalSec)||0));
-    const raw = String(script || "")
-      .replaceAll("
-", "
-")
-      .replaceAll("
-", "
-")
+    const raw = normalizeNewlines(script)
       .split("
 ")
       .map(x => x.trim())
