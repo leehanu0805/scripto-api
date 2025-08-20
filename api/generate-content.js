@@ -1,11 +1,11 @@
-// api/generate-content.js — Vercel Serverless Function (CommonJS)
-// 성공: 200 { result: "..." } / 실패: 4xx~5xx { error: "..." }
-// 안전판: 멀티라인 문자열은 전부 배열+join("\\n") 사용 (백틱/정규식/replaceAll 안 씀)
+// api/generate-content.js — Enhanced Vercel Serverless Function
+// 스크립트 + 화면전환 + B-roll + 텍스트오버레이 + 사운드이펙트 지원
+// 성공: 200 { result: "script" | { script, transitions, bRoll, textOverlays, soundEffects } }
 
 "use strict";
 
-module.exports = async (req, res) => {
-  // ---------- CORS ----------
+// ========== CORS 설정 모듈 ==========
+function setupCORS(req, res) {
   const rawList = process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || "";
   const ALLOW_LIST = rawList
     .split(",")
@@ -34,58 +34,54 @@ module.exports = async (req, res) => {
   } else if (allowThis && requestOrigin) {
     res.setHeader("Access-Control-Allow-Origin", requestOrigin);
   } else {
-    if (req.method === "OPTIONS") return res.status(204).end();
-    return res.status(403).json({ error: "CORS: origin not allowed" });
+    return false;
   }
+  return true;
+}
 
-  if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+// ========== 환경 설정 모듈 ==========
+function getConfig() {
+  return {
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    OPENAI_MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    HARD_TIMEOUT_MS: Math.max(15000, Math.min(Number(process.env.HARD_TIMEOUT_MS) || 30000, 120000)),
+    DEBUG_ERRORS: process.env.DEBUG_ERRORS === "1" || process.env.DEBUG_ERRORS === "true"
+  };
+}
 
-  // ---------- Config ----------
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  const HARD_TIMEOUT_MS = Math.max(15000, Math.min(Number(process.env.HARD_TIMEOUT_MS) || 30000, 120000));
-  const DEBUG_ERRORS = process.env.DEBUG_ERRORS === "1" || process.env.DEBUG_ERRORS === "true";
-
-  if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
-
-  // ---------- Safe body parse ----------
-  async function readJsonBody(req) {
-    if (req.body && typeof req.body === "object") return req.body;
-    if (typeof req.body === "string" && req.body.length) {
-      try { return JSON.parse(req.body); } catch {}
-    }
-    let raw = "";
-    await new Promise((resolve) => { req.on("data", (c) => (raw += c)); req.on("end", resolve); });
-    try { return JSON.parse(raw || "{}"); } catch { return {}; }
+// ========== 요청 본문 파싱 모듈 ==========
+async function parseRequestBody(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+  if (typeof req.body === "string" && req.body.length) {
+    try { return JSON.parse(req.body); } catch {}
   }
+  let raw = "";
+  await new Promise((resolve) => { 
+    req.on("data", (c) => (raw += c)); 
+    req.on("end", resolve); 
+  });
+  try { return JSON.parse(raw || "{}"); } catch { return {}; }
+}
 
-  const body = await readJsonBody(req);
-  const { text, style, length = 45, tone = "Neutral", language = "English", ctaInclusion = false } = body || {};
-  if (!text || typeof text !== "string") return res.status(400).json({ error: "`text` is required" });
-  if (!style || typeof style !== "string") return res.status(400).json({ error: "`style` is required" });
+// ========== 언어 처리 모듈 ==========
+function normalizeLanguageKey(language) {
+  const L = String(language || "").trim().toLowerCase();
+  if (L.includes("korean") || L.includes("한국") || L === "ko") return "ko";
+  if (L.includes("english") || L === "en") return "en";
+  if (L.includes("spanish") || L === "es") return "es";
+  if (L.includes("french") || L === "fr") return "fr";
+  if (L.includes("german") || L === "de") return "de";
+  if (L.includes("italian") || L === "it") return "it";
+  if (L.includes("portuguese") || L === "pt") return "pt";
+  if (L.includes("dutch") || L === "nl") return "nl";
+  if (L.includes("russian") || L === "ru") return "ru";
+  if (L.includes("japanese") || L.includes("日本") || L === "ja") return "ja";
+  if (L.includes("chinese") || L.includes("中文") || L === "zh") return "zh";
+  if (L.includes("arabic") || L === "ar") return "ar";
+  return "en";
+}
 
-  const sec = Math.max(15, Math.min(Number(length) || 45, 180));
-
-  // ---------- Language/WPS ----------
-  function normLangKey(s) {
-    const L = String(s || "").trim().toLowerCase();
-    if (L.includes("korean") || L.includes("한국") || L === "ko") return "ko";
-    if (L.includes("english") || L === "en") return "en";
-    if (L.includes("spanish") || L === "es") return "es";
-    if (L.includes("french") || L === "fr") return "fr";
-    if (L.includes("german") || L === "de") return "de";
-    if (L.includes("italian") || L === "it") return "it";
-    if (L.includes("portuguese") || L === "pt") return "pt";
-    if (L.includes("dutch") || L === "nl") return "nl";
-    if (L.includes("russian") || L === "ru") return "ru";
-    if (L.includes("japanese") || L.includes("日本") || L === "ja") return "ja";
-    if (L.includes("chinese") || L.includes("中文") || L === "zh") return "zh";
-    if (L.includes("arabic") || L === "ar") return "ar";
-    return "en";
-  }
-
-  const LKEY = normLangKey(language);
+function getWordsPerSecond(language) {
   const WPS_TABLE = {
     en: Number(process.env.WPS_EN) || 2.6,
     ko: Number(process.env.WPS_KO) || 3.0,
@@ -100,274 +96,601 @@ module.exports = async (req, res) => {
     zh: Number(process.env.WPS_ZH) || 3.2,
     ar: Number(process.env.WPS_AR) || 2.6
   };
-  const WPS = WPS_TABLE[LKEY] || 2.6;
-  const wordsTarget = Math.round(sec * WPS);
+  const langKey = normalizeLanguageKey(language);
+  return WPS_TABLE[langKey] || 2.6;
+}
 
-  // ---------- Newline helpers (no regex) ----------
-  function normalizeNewlines(s) {
-    const t = String(s || "");
-    let out = "";
-    const NL = String.fromCharCode(10);
-    for (let i = 0; i < t.length; i++) {
-      const code = t.charCodeAt(i);
-      if (code === 13) { // CR
-        if (t.charCodeAt(i + 1) === 10) i++; // CRLF
-        out += NL;
-      } else {
-        out += t[i];
-      }
+// ========== 문자열 처리 모듈 ==========
+function normalizeNewlines(text) {
+  const str = String(text || "");
+  let output = "";
+  const LF = String.fromCharCode(10);
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (code === 13) { // CR
+      if (str.charCodeAt(i + 1) === 10) i++; // CRLF -> LF
+      output += LF;
+    } else {
+      output += str[i];
     }
-    return out;
   }
+  return output;
+}
 
-  function splitLinesSafe(s) {
-    const norm = normalizeNewlines(s);
-    const arr = [];
-    let buf = "";
-    for (let i = 0; i < norm.length; i++) {
-      const code = norm.charCodeAt(i);
-      if (code === 10) { // LF
-        const trimmed = buf.trim();
-        if (trimmed) arr.push(trimmed);
-        buf = "";
-      } else {
-        buf += norm[i];
-      }
+function splitLines(text) {
+  const normalized = normalizeNewlines(text);
+  const lines = [];
+  let buffer = "";
+  for (let i = 0; i < normalized.length; i++) {
+    const code = normalized.charCodeAt(i);
+    if (code === 10) { // LF
+      const trimmed = buffer.trim();
+      if (trimmed) lines.push(trimmed);
+      buffer = "";
+    } else {
+      buffer += normalized[i];
     }
-    if (buf.trim()) arr.push(buf.trim());
-    return arr;
   }
+  if (buffer.trim()) lines.push(buffer.trim());
+  return lines;
+}
 
-  function stripTimePrefix(line) {
-    const s = String(line || "").trim();
-    if (s.length > 2 && s[0] === "[") {
-      const rb = s.indexOf("]");
-      if (rb > 1) return s.slice(rb + 1).trim();
-    }
-    return s;
+function stripTimePrefix(line) {
+  const text = String(line || "").trim();
+  if (text.length > 2 && text[0] === "[") {
+    const closeBracket = text.indexOf("]");
+    if (closeBracket > 1) return text.slice(closeBracket + 1).trim();
   }
+  return text;
+}
 
-  function hasTag(s, tag) { return String(s).toUpperCase().indexOf(tag) >= 0; }
+function hasTag(text, tag) {
+  return String(text).toUpperCase().indexOf(tag) >= 0;
+}
 
-  function wordWeight(line, lang) {
-    const txt = String(line || "").replace("[HOOK]", "").replace("[CTA]", "").trim();
-    if (!txt) return 1;
-    let words = 0, inWord = false, letters = 0;
-    for (let i = 0; i < txt.length; i++) {
-      const ch = txt[i];
-      const isSpace = ch === " " || ch === "	";
-      if (isSpace) { if (inWord) { words++; inWord = false; } }
-      else { inWord = true; letters++; }
-    }
-    if (inWord) words++;
-    if (words === 0) words = Math.max(1, Math.floor(letters / 2));
-    return Math.max(1, words);
-  }
-
-  function clipWordsPerLine(text, lang) {
-    const arr = splitLinesSafe(text);
-    const out = [];
-    const lower = String(lang || "").toLowerCase();
-    const isKo = lower.includes("ko") || lower.includes("korean") || lower.includes("한국");
-    const MAX = isKo ? 18 : 16; // rollback limits
-    for (let i = 0; i < arr.length; i++) {
-      const l = arr[i];
-      const parts = l.split(" ").filter(Boolean);
-      out.push(parts.length <= MAX ? l : parts.slice(0, MAX).join(" "));
-    }
-    return out.join("\n");
-  }
-
-  function round1(n) { return Math.round(n * 10) / 10; }
-  function to1(n) { return round1(n).toFixed(1); }
-
-  function retimeScript(script, totalSec, lang) {
-    try {
-      const T = Math.max(1, round1(Number(totalSec) || 0));
-      if (!script) return script;
-      const raw = splitLinesSafe(script);
-      if (!raw.length) return script;
-
-      const items = raw.map(function (l) {
-        const textOnly = stripTimePrefix(l);
-        return { text: textOnly, isHook: hasTag(textOnly, "[HOOK]"), isCTA: hasTag(textOnly, "[CTA]") };
-      });
-
-      if (!items[0].isHook) {
-        items[0].text = "[HOOK] " + items[0].text.replace("[HOOK]", "").trim();
-        items[0].isHook = true;
-      }
-
-      const weights = items.map(function (it) { return Math.max(1, wordWeight(it.text, lang)); });
-      var sumW = 0; for (var i = 0; i < weights.length; i++) sumW += weights[i];
-      if (sumW <= 0) { for (var j = 0; j < weights.length; j++) weights[j] = 1; sumW = weights.length; }
-
-      const durs = weights.map(function (w) { return (w / sumW) * T; });
-
-      const hookMin = 0.10 * T, hookMax = 0.15 * T; // rollback ratios
-      durs[0] = Math.min(hookMax, Math.max(hookMin, durs[0]));
-      var ctaIdx = -1; for (var k = 0; k < items.length; k++) if (items[k].isCTA) { ctaIdx = k; break; }
-      if (ctaIdx >= 0) durs[ctaIdx] = Math.min(durs[ctaIdx], 0.08 * T);
-
-      const frozen = {}; frozen[0] = true; if (ctaIdx >= 0) frozen[ctaIdx] = true;
-      var frozenSum = 0; for (var a = 0; a < durs.length; a++) if (frozen[a]) frozenSum += durs[a];
-      var freeSum = 0; const freeIdx = []; for (var b = 0; b < durs.length; b++) if (!frozen[b]) { freeSum += durs[b]; freeIdx.push(b); }
-      const remain = Math.max(0.1, T - frozenSum);
-      const scale = freeSum > 0 ? (remain / freeSum) : 1.0;
-      for (var c = 0; c < freeIdx.length; c++) durs[freeIdx[c]] *= scale;
-
-      const out = [];
-      var cur = 0;
-      for (var m = 0; m < items.length; m++) {
-        if (m === items.length - 1) {
-          const start = to1(cur);
-          const end = to1(T);
-          out.push("[" + start + "-" + end + "] " + items[m].text);
-          cur = T;
-        } else {
-          const start = to1(cur);
-          var endNum = round1(cur + durs[m]);
-          if (endNum >= T) endNum = Math.max(round1(T - 0.1), round1(cur + 0.1));
-          const end = to1(endNum);
-          out.push("[" + start + "-" + end + "] " + items[m].text);
-          cur = endNum;
+// ========== 타이밍 파싱 모듈 ==========
+function parseTimestamp(line) {
+  const text = String(line || "").trim();
+  if (text.length > 2 && text[0] === "[") {
+    const closeBracket = text.indexOf("]");
+    if (closeBracket > 1) {
+      const timestamp = text.slice(1, closeBracket);
+      const parts = timestamp.split("-");
+      if (parts.length === 2) {
+        const start = parseFloat(parts[0]);
+        const end = parseFloat(parts[1]);
+        if (!isNaN(start) && !isNaN(end)) {
+          return { start, end };
         }
       }
-
-      return out.join("\n");
-    } catch (e) {
-      return script;
     }
   }
+  return null;
+}
 
-  // ---------- Style examples (arrays + join) ----------
-  const styleExamples = {
+// ========== 단어 수 계산 모듈 ==========
+function calculateWordWeight(line, language) {
+  const text = String(line || "").replace("[HOOK]", "").replace("[CTA]", "").trim();
+  if (!text) return 1;
+  
+  let words = 0, inWord = false, letters = 0;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const isSpace = char === " " || char === "\t";
+    if (isSpace) {
+      if (inWord) { words++; inWord = false; }
+    } else {
+      inWord = true; letters++;
+    }
+  }
+  if (inWord) words++;
+  
+  // 단어가 없으면 글자 수 기반으로 추정
+  if (words === 0) words = Math.max(1, Math.floor(letters / 2));
+  return Math.max(1, words);
+}
+
+function limitWordsPerLine(text, language) {
+  const lines = splitLines(text);
+  const output = [];
+  const isKorean = String(language || "").toLowerCase().includes("ko");
+  const MAX_WORDS = isKorean ? 18 : 16; // 한국어는 조금 더 여유롭게
+  
+  for (const line of lines) {
+    const words = line.split(" ").filter(Boolean);
+    output.push(words.length <= MAX_WORDS ? line : words.slice(0, MAX_WORDS).join(" "));
+  }
+  return output.join("\n");
+}
+
+// ========== 타이밍 재조정 모듈 ==========
+function retimeScript(script, totalSeconds, language) {
+  try {
+    const duration = Math.max(1, Math.round(Number(totalSeconds) || 0 * 10) / 10);
+    if (!script) return script;
+    
+    const lines = splitLines(script);
+    if (!lines.length) return script;
+
+    // 각 라인 분석
+    const items = lines.map(line => {
+      const textOnly = stripTimePrefix(line);
+      return {
+        text: textOnly,
+        isHook: hasTag(textOnly, "[HOOK]"),
+        isCTA: hasTag(textOnly, "[CTA]")
+      };
+    });
+
+    // 첫 번째 라인이 HOOK이 아니면 추가
+    if (!items[0].isHook) {
+      items[0].text = "[HOOK] " + items[0].text.replace("[HOOK]", "").trim();
+      items[0].isHook = true;
+    }
+
+    // 단어 가중치 계산
+    const weights = items.map(item => calculateWordWeight(item.text, language));
+    let totalWeight = weights.reduce((sum, w) => sum + w, 0);
+    if (totalWeight <= 0) {
+      weights.fill(1);
+      totalWeight = weights.length;
+    }
+
+    // 기본 시간 분배
+    const durations = weights.map(weight => (weight / totalWeight) * duration);
+
+    // HOOK과 CTA에 특별 비율 적용
+    const hookMin = 0.10 * duration, hookMax = 0.15 * duration;
+    durations[0] = Math.min(hookMax, Math.max(hookMin, durations[0]));
+    
+    const ctaIndex = items.findIndex(item => item.isCTA);
+    if (ctaIndex >= 0) {
+      durations[ctaIndex] = Math.min(durations[ctaIndex], 0.08 * duration);
+    }
+
+    // 고정된 시간을 제외한 나머지 재분배
+    const frozenIndices = new Set([0]);
+    if (ctaIndex >= 0) frozenIndices.add(ctaIndex);
+    
+    const frozenSum = Array.from(frozenIndices).reduce((sum, i) => sum + durations[i], 0);
+    const freeIndices = durations.map((_, i) => i).filter(i => !frozenIndices.has(i));
+    const freeSum = freeIndices.reduce((sum, i) => sum + durations[i], 0);
+    
+    const remainingTime = Math.max(0.1, duration - frozenSum);
+    const scale = freeSum > 0 ? (remainingTime / freeSum) : 1.0;
+    
+    freeIndices.forEach(i => durations[i] *= scale);
+
+    // 최종 타임스탬프 생성
+    const result = [];
+    let currentTime = 0;
+    
+    for (let i = 0; i < items.length; i++) {
+      const start = Math.round(currentTime * 10) / 10;
+      
+      if (i === items.length - 1) {
+        // 마지막 라인은 정확히 총 시간으로 끝남
+        const end = duration;
+        result.push(`[${start.toFixed(1)}-${end.toFixed(1)}] ${items[i].text}`);
+      } else {
+        let endTime = Math.round((currentTime + durations[i]) * 10) / 10;
+        if (endTime >= duration) endTime = Math.max(duration - 0.1, start + 0.1);
+        result.push(`[${start.toFixed(1)}-${endTime.toFixed(1)}] ${items[i].text}`);
+        currentTime = endTime;
+      }
+    }
+
+    return result.join("\n");
+  } catch (error) {
+    console.error("Retiming error:", error);
+    return script; // 에러 시 원본 반환
+  }
+}
+
+// ========== 개선된 스타일 예시 ==========
+function getStyleExamples() {
+  return {
     meme: [
-      "EXAMPLE (meme, 25s): [HOOK] POV you still edit 1-by-1",
-      "setup->twist->tag. 3-5 beats. One punchline."
+      "EXAMPLE (meme, 25s): [HOOK] POV: You're still editing videos one by one",
+      "Setup → Unexpected twist → Relatable punchline. Keep it 3-5 beats max."
     ].join("\n"),
+    
     quicktip: [
-      "EXAMPLE (quicktip, 30s): [HOOK] Batch film = 3x output",
-      "1) Script bullets only.",
-      "2) Lock exposure.",
-      "3) A-roll then B-roll.",
-      "[CTA] Comment \"GEAR\"."
+      "EXAMPLE (quicktip, 30s): [HOOK] Stop wasting hours on video editing",
+      "1) Batch your filming sessions",
+      "2) Lock your camera settings", 
+      "3) Film all A-roll, then B-roll",
+      "[CTA] Try this and comment your results!"
     ].join("\n"),
+    
     challenge: [
-      "EXAMPLE (challenge, 30s): [HOOK] 10 pushups every missed beat",
-      "premise->rules->attempt->result. Present tense. One suspense beat."
+      "EXAMPLE (challenge, 30s): [HOOK] I'll do 100 pushups every time I mess up this recipe",
+      "Clear rules → Real-time attempt → Genuine reactions → Final outcome"
     ].join("\n"),
+    
     storytelling: [
-      "EXAMPLE (storytelling, 45s): [HOOK] Missed the midnight train",
-      "incident->complication->turn->button. Vivid verbs."
+      "EXAMPLE (storytelling, 45s): [HOOK] I almost missed the most important meeting of my life",
+      "Incident → Rising tension → Unexpected turn → Satisfying resolution"
     ].join("\n"),
+    
     productplug: [
-      "EXAMPLE (productplug, 35s): [HOOK] Editing took me 3 hours",
-      "problem->product->proof->how-to->CTA. No hype words."
+      "EXAMPLE (productplug, 35s): [HOOK] This editing took me 6 hours before I found this tool",
+      "Real problem → Natural solution introduction → Quick demo → Clear CTA"
     ].join("\n"),
+    
     faceless: [
-      "EXAMPLE (faceless, 30s): [HOOK] Stop wasting your B-roll",
-      "voiceover-only, short lines, no camera directions."
+      "EXAMPLE (faceless, 30s): [HOOK] These B-roll mistakes are killing your retention",
+      "Voice-over only, punchy lines, no camera directions needed"
     ].join("\n")
   };
-  const styleKey = String(style || "").toLowerCase();
+}
+
+// ========== 개선된 시스템 프롬프트 생성 ==========
+function createSystemPrompt(styleKey, outputType) {
+  const styleExamples = getStyleExamples();
   const styleHint = styleExamples[styleKey] || "";
 
-  // ---------- System prompt (array join) ----------
-  const sys = [
-    "You are a short-form video scriptwriter for TikTok/Reels/Shorts.",
-    "Always write in the requested LANGUAGE. Return only the script text—no JSON/markdown/disclaimers.",
-    "Keep pacing for TARGET_DURATION_SECONDS and roughly TARGET_WORDS_SOFT_CAP words.",
+  let basePrompt = [
+    "You are an expert short-form video creator specializing in TikTok, Instagram Reels, and YouTube Shorts.",
+    "Create compelling scripts that maximize viewer retention and engagement.",
+    "Always write in the requested LANGUAGE. Return ONLY the script text—no JSON, markdown, or explanations.",
     "",
-    "OUTPUT FORMAT (STRICT)",
-    "- Total lines (including HOOK and optional CTA): 6–9 lines.",
-    "- Prefix EVERY line with a time range in seconds using ONE decimal place: [start-end] (e.g., [0.0-1.2]).",
-    "- First line is the hook: [0.0-H] [HOOK] (H ~ 10-15% of total duration).",
-    "- Then 5–7 body lines, each with its own [start-end]; <= 16–18 words per line; one idea per line.",
-    "- If CTA=Yes, end with: [C1-C2] [CTA] (one short line).",
-    "- Do not include any other text, labels, or explanations.",
+    "⏱️ TIMING REQUIREMENTS",
+    "- Target duration: TARGET_DURATION_SECONDS with roughly TARGET_WORDS_SOFT_CAP words",
+    "- Every line must have precise timestamp: [start-end] using ONE decimal place",
+    "- Time ranges must be contiguous: next start = previous end",
+    "- Final timestamp must equal TARGET_DURATION_SECONDS exactly",
     "",
-    "TIMING RULES",
-    "- Time ranges must be contiguous and non-overlapping: next start == previous end.",
-    "- The final end must be exactly TARGET_DURATION_SECONDS (match to one decimal if needed).",
-    "- Suggested allocation: HOOK ~ 10–15% of total; CTA <= 8%; rest to body lines.",
+    "📝 STRUCTURE REQUIREMENTS", 
+    "- Total: 6-9 lines (including HOOK and optional CTA)",
+    "- First line: [0.0-H] [HOOK] (H should be 10-15% of total duration)",
+    "- Body: 5-7 lines, each ≤16-18 words, one clear idea per line",
+    "- Optional final line: [C1-C2] [CTA] (if CTA=Yes, keep ≤8% of duration)",
     "",
-    "LENGTH ALIGNMENT",
-    "- Aim for TOTAL words ~ TARGET_WORDS_SOFT_CAP (+/-10%).",
-    "- Distribute words roughly proportional to each segment's duration.",
-    "- Shorter segments fewer words; longer segments may have more, within per-line limits.",
+    "🎯 CONTENT STRATEGY",
+    "- HOOK: Must create immediate curiosity or promise value",
+    "- BODY: Logical progression, specific details over vague adjectives", 
+    "- CTA: Natural, actionable, related to content",
+    "- Language: Conversational, platform-appropriate, avoid corporate speak",
     "",
-    "STYLE PACKS",
-    "- meme: setup->twist->tag; 3-5 beats; internet slang ok.",
-    "- quicktip: 3-5 numbered tips; each <= 2 lines; 1-line summary.",
-    "- challenge: premise->rules->attempt->result; present tense; suspense.",
-    "- storytelling: incident->complication->turn->button; vivid verbs.",
-    "- productplug: problem->product->proof->how-to->CTA; no hype words.",
-    "- faceless: voiceover-only; short lines; no camera directions.",
+    "🎬 STYLE GUIDELINES",
+    "- meme: Setup → twist → punchline (3-5 beats, internet slang OK)",
+    "- quicktip: 3-5 numbered actionable tips + summary",
+    "- challenge: Rules → attempt → real reactions → outcome",
+    "- storytelling: Incident → tension → twist → resolution", 
+    "- productplug: Problem → solution → proof → how-to → CTA",
+    "- faceless: Voice-over optimized, short punchy lines",
     "",
     styleHint
   ].join("\n");
 
-  // ---------- User prompt (string concat) ----------
-  const user =
-    "TOPIC: " + text + "\n" +
-    "STYLE: " + style + "\n" +
-    "TONE: " + tone + "\n" +
-    "LANGUAGE: " + language + "\n" +
-    "TARGET_DURATION_SECONDS: " + sec + "\n" +
-    "TARGET_WORDS_SOFT_CAP: " + wordsTarget + "\n" +
-    "CTA: " + (ctaInclusion ? "Yes" : "No") + "\n" +
-    "KEYWORDS (must appear >=1 time): " + (String(text).indexOf(",") >= 0 ? text : "N/A") + "\n\n" +
-    "CONSTRAINTS:\n" +
-    "- Mention TOPIC explicitly within first 2 lines.\n" +
-    "- Structure: [HOOK] -> 5–7 body lines -> optional [CTA].\n" +
-    "- Prefer specifics over adjectives.\n\n" +
-    "Write the final script now.";
+  if (outputType === "complete") {
+    basePrompt += [
+      "",
+      "🎬 IMPORTANT: This script will be used to generate additional production elements:",
+      "- Screen transitions and cut timing suggestions",
+      "- B-roll footage recommendations", 
+      "- Text overlay suggestions",
+      "- Sound effect recommendations",
+      "Consider visual storytelling and production needs when writing."
+    ].join("\n");
+  }
 
-  // ---------- OpenAI Call ----------
+  return basePrompt;
+}
+
+// ========== 개선된 사용자 프롬프트 생성 ==========
+function createUserPrompt(params) {
+  const { text, style, tone, language, duration, wordsTarget, ctaInclusion } = params;
+  
+  return [
+    `VIDEO IDEA: ${text}`,
+    `STYLE: ${style}`,
+    `TONE: ${tone}`,
+    `LANGUAGE: ${language}`,
+    `TARGET_DURATION_SECONDS: ${duration}`,
+    `TARGET_WORDS_SOFT_CAP: ${wordsTarget}`,
+    `CTA: ${ctaInclusion ? "Yes" : "No"}`,
+    `KEYWORDS (must appear ≥1 time): ${text.includes(",") ? text : "N/A"}`,
+    "",
+    "🎯 SPECIFIC REQUIREMENTS:",
+    "- Mention the VIDEO IDEA explicitly within first 2 lines",
+    "- Structure: [HOOK] → 5-7 body lines → optional [CTA]",
+    "- Use specific examples and concrete details",
+    "- Avoid generic adjectives, focus on unique value",
+    "",
+    "Write the complete timestamped script now:"
+  ].join("\n");
+}
+
+// ========== 비주얼 요소 생성 모듈 ==========
+function generateVisualElements(script, videoIdea, style, duration) {
+  try {
+    const lines = splitLines(script);
+    const transitions = [];
+    const bRoll = [];
+    const textOverlays = [];
+    const soundEffects = [];
+
+    lines.forEach((line, index) => {
+      const timestamp = parseTimestamp(line);
+      const content = stripTimePrefix(line);
+      
+      if (!timestamp) return;
+
+      const { start, end } = timestamp;
+      const isHook = hasTag(content, "[HOOK]");
+      const isCTA = hasTag(content, "[CTA]");
+
+      // Transitions (화면 전환)
+      if (index > 0) {
+        const transitionTypes = {
+          meme: ["Quick cut", "Zoom in", "Snap transition"],
+          quicktip: ["Smooth fade", "Slide transition", "Clean cut"],
+          challenge: ["Quick cut", "Jump cut", "Zoom out"],
+          storytelling: ["Smooth fade", "Cross dissolve", "Cinematic cut"],
+          productplug: ["Clean cut", "Smooth zoom", "Product focus"],
+          faceless: ["B-roll transition", "Text overlay fade", "Smooth cut"]
+        };
+
+        const types = transitionTypes[style] || ["Clean cut", "Smooth fade", "Quick cut"];
+        const randomType = types[Math.floor(Math.random() * types.length)];
+        
+        transitions.push({
+          time: `${start.toFixed(1)}s`,
+          type: randomType,
+          description: getTransitionDescription(content, randomType, style)
+        });
+      }
+
+      // B-Roll Suggestions
+      if (!isHook && !isCTA) {
+        bRoll.push({
+          timeRange: `${start.toFixed(1)}-${end.toFixed(1)}s`,
+          content: getBRollSuggestion(content, videoIdea, style)
+        });
+      }
+
+      // Text Overlays
+      if (isHook) {
+        textOverlays.push({
+          time: `${start.toFixed(1)}s`,
+          text: extractKeyPhrase(content),
+          style: "Bold hook title"
+        });
+      } else if (content.match(/\d+\)/)) { // numbered points
+        const number = content.match(/(\d+)\)/)?.[1];
+        if (number) {
+          textOverlays.push({
+            time: `${start.toFixed(1)}s`,
+            text: `TIP ${number}`,
+            style: "Number highlight"
+          });
+        }
+      } else if (isCTA) {
+        textOverlays.push({
+          time: `${start.toFixed(1)}s`,
+          text: "👆 TRY THIS",
+          style: "Call-to-action prompt"
+        });
+      }
+
+      // Sound Effects
+      if (isHook) {
+        soundEffects.push({
+          time: `${start.toFixed(1)}s`,
+          effect: "Attention grab sound"
+        });
+      } else if (index > 0 && index < lines.length - 1) {
+        if (style === "meme") {
+          soundEffects.push({
+            time: `${start.toFixed(1)}s`,
+            effect: "Meme transition sound"
+          });
+        } else if (style === "quicktip") {
+          soundEffects.push({
+            time: `${start.toFixed(1)}s`,
+            effect: "Tip notification sound"
+          });
+        } else {
+          soundEffects.push({
+            time: `${start.toFixed(1)}s`,
+            effect: "Smooth transition whoosh"
+          });
+        }
+      }
+    });
+
+    return { transitions, bRoll, textOverlays, soundEffects };
+  } catch (error) {
+    console.error("Visual elements generation error:", error);
+    return { transitions: [], bRoll: [], textOverlays: [], soundEffects: [] };
+  }
+}
+
+function getTransitionDescription(content, transitionType, style) {
+  const contentLower = content.toLowerCase();
+  
+  if (contentLower.includes("iphone") || contentLower.includes("phone")) {
+    return "Close-up of device";
+  } else if (contentLower.includes("app") || contentLower.includes("interface")) {
+    return "Screen recording of interface";
+  } else if (contentLower.includes("2007") || contentLower.includes("2008")) {
+    return "Historical footage or timeline graphic";
+  } else if (style === "challenge") {
+    return "Action shot or reaction closeup";
+  } else if (style === "storytelling") {
+    return "Narrative scene change";
+  } else {
+    return "Supporting visual or demonstration";
+  }
+}
+
+function getBRollSuggestion(content, videoIdea, style) {
+  const contentLower = content.toLowerCase();
+  const ideaLower = videoIdea.toLowerCase();
+  
+  if (contentLower.includes("iphone") || contentLower.includes("phone")) {
+    return "iPhone product shots, hands using device, close-up details";
+  } else if (contentLower.includes("app store")) {
+    return "App Store browsing footage, app downloads, interface navigation";
+  } else if (contentLower.includes("interface") || contentLower.includes("user")) {
+    return "Screen recordings of iPhone UI, finger gestures, interface interactions";
+  } else if (ideaLower.includes("fitness") || ideaLower.includes("workout")) {
+    return "Exercise demonstration footage, gym scenes, workout equipment";
+  } else if (ideaLower.includes("cooking") || ideaLower.includes("recipe")) {
+    return "Cooking process shots, ingredient close-ups, final dish presentation";
+  } else if (style === "storytelling") {
+    return "Supporting narrative visuals, relevant scenes, emotional moments";
+  } else {
+    return "Relevant demonstration footage, supporting visuals, contextual imagery";
+  }
+}
+
+function extractKeyPhrase(content) {
+  // Remove timestamp and tags
+  let cleaned = stripTimePrefix(content).replace("[HOOK]", "").replace("[CTA]", "").trim();
+  
+  // Extract first meaningful phrase (up to 4 words)
+  const words = cleaned.split(" ").filter(Boolean);
+  if (words.length <= 4) return cleaned;
+  
+  // Look for question patterns
+  if (cleaned.startsWith("How")) return words.slice(0, 4).join(" ") + "?";
+  if (cleaned.includes("?")) return cleaned.split("?")[0] + "?";
+  
+  // Take first 3-4 words
+  return words.slice(0, Math.min(4, words.length)).join(" ");
+}
+
+// ========== OpenAI API 호출 모듈 ==========
+async function callOpenAI(systemPrompt, userPrompt, config) {
+  const { OPENAI_API_KEY, OPENAI_MODEL, HARD_TIMEOUT_MS } = config;
+  
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HARD_TIMEOUT_MS);
 
   try {
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + OPENAI_API_KEY },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`
+      },
       body: JSON.stringify({
         model: OPENAI_MODEL,
         temperature: 0.4,
         top_p: 0.9,
         max_tokens: 700,
         messages: [
-          { role: "system", content: sys },
-          { role: "user", content: user }
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
         ]
       }),
       signal: controller.signal
     });
 
-    if (!r.ok) {
-      const err = await r.text().catch(function () { return ""; });
-      clearTimeout(timer);
-      console.error("[OpenAI error]", r.status, err.slice(0, 300));
-      return res.status(r.status).json({ error: "OpenAI " + r.status + ": " + err });
+    clearTimeout(timer);
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "");
+      throw new Error(`OpenAI API ${response.status}: ${errorText}`);
     }
 
-    const data = await r.json();
-    const draft = ((data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "").trim();
-    if (!draft) {
-      clearTimeout(timer);
-      return res.status(502).json({ error: "Empty response from model" });
+    const data = await response.json();
+    const content = data?.choices?.[0]?.message?.content?.trim();
+    
+    if (!content) {
+      throw new Error("Empty response from OpenAI");
     }
 
-    const retimed = retimeScript(clipWordsPerLine(draft, language), sec, language);
+    return content;
+  } catch (error) {
+    clearTimeout(timer);
+    if (error.name === "AbortError") {
+      throw new Error("Request timeout");
+    }
+    throw error;
+  }
+}
 
-    clearTimeout(timer);
-    return res.status(200).json({ result: retimed });
-  } catch (e) {
-    clearTimeout(timer);
-    const msg = (e && e.stack) || (e && e.message) || String(e);
-    console.error("[Server error]", msg);
-    if (e && e.name === "AbortError") return res.status(504).json({ error: "Upstream timeout" });
-    return res.status(500).json({ error: DEBUG_ERRORS ? String(msg) : "Server error" });
+// ========== 메인 핸들러 ==========
+module.exports = async (req, res) => {
+  // CORS 처리
+  if (!setupCORS(req, res)) {
+    if (req.method === "OPTIONS") return res.status(204).end();
+    return res.status(403).json({ error: "CORS: origin not allowed" });
+  }
+
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+
+  // 설정 및 검증
+  const config = getConfig();
+  if (!config.OPENAI_API_KEY) {
+    return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+  }
+
+  try {
+    // 요청 본문 파싱
+    const body = await parseRequestBody(req);
+    const { 
+      text, 
+      style, 
+      length = 45, 
+      tone = "Neutral", 
+      language = "English", 
+      ctaInclusion = false,
+      outputType = "script" // 새로운 파라미터
+    } = body;
+
+    // 입력 검증
+    if (!text || typeof text !== "string") {
+      return res.status(400).json({ error: "`text` (video idea) is required" });
+    }
+    if (!style || typeof style !== "string") {
+      return res.status(400).json({ error: "`style` is required" });
+    }
+
+    // 매개변수 정규화
+    const duration = Math.max(15, Math.min(Number(length) || 45, 180));
+    const wps = getWordsPerSecond(language);
+    const wordsTarget = Math.round(duration * wps);
+    const styleKey = String(style || "").toLowerCase();
+    const output = String(outputType || "script").toLowerCase();
+
+    // 프롬프트 생성
+    const systemPrompt = createSystemPrompt(styleKey, output);
+    const userPrompt = createUserPrompt({
+      text, style, tone, language, duration, wordsTarget, ctaInclusion
+    });
+
+    // AI 호출
+    const rawScript = await callOpenAI(systemPrompt, userPrompt, config);
+    
+    // 후처리
+    const limitedScript = limitWordsPerLine(rawScript, language);
+    const finalScript = retimeScript(limitedScript, duration, language);
+
+    // 응답 생성
+    if (output === "complete") {
+      // Complete Package: 스크립트 + 비주얼 요소
+      const visualElements = generateVisualElements(finalScript, text, styleKey, duration);
+      
+      return res.status(200).json({
+        result: {
+          script: finalScript,
+          ...visualElements
+        }
+      });
+    } else {
+      // Script Only: 기존 방식
+      return res.status(200).json({ result: finalScript });
+    }
+
+  } catch (error) {
+    console.error("[API Error]", error.message);
+    const errorMessage = config.DEBUG_ERRORS ? error.message : "Internal server error";
+    return res.status(500).json({ error: errorMessage });
   }
 };
