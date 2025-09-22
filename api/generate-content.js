@@ -1,6 +1,5 @@
-// api/generate-content.js — Enhanced Vercel Serverless Function (All Bugs Fixed)
-// 시간 길이 버그 + 스마트 비주얼 요소 생성 + 모든 문제점 수정
-// 성공: 200 { result: "script" | { script, transitions, bRoll, textOverlays, soundEffects } }
+// api/generate-content.js — Enhanced Script Quality Version
+// 스크립트 품질 대폭 개선: 프롬프트 강화, 스타일별 최적화, 실전 예시 추가
 
 "use strict";
 
@@ -83,21 +82,21 @@ function normalizeLanguageKey(language) {
 
 function getWordsPerSecond(language) {
   const WPS_TABLE = {
-    en: Number(process.env.WPS_EN) || 2.6,
-    ko: Number(process.env.WPS_KO) || 3.0,
-    es: Number(process.env.WPS_ES) || 3.0,
-    fr: Number(process.env.WPS_FR) || 2.8,
-    de: Number(process.env.WPS_DE) || 2.6,
-    it: Number(process.env.WPS_IT) || 2.8,
-    pt: Number(process.env.WPS_PT) || 2.8,
-    nl: Number(process.env.WPS_NL) || 2.6,
-    ru: Number(process.env.WPS_RU) || 2.7,
-    ja: Number(process.env.WPS_JA) || 3.2,
-    zh: Number(process.env.WPS_ZH) || 3.2,
-    ar: Number(process.env.WPS_AR) || 2.6
+    en: 2.5,  // 약간 줄임 (더 자연스러운 속도)
+    ko: 2.8,  // 한국어 특성 반영
+    es: 2.8,
+    fr: 2.6,
+    de: 2.4,
+    it: 2.6,
+    pt: 2.6,
+    nl: 2.4,
+    ru: 2.5,
+    ja: 3.0,
+    zh: 3.0,
+    ar: 2.4
   };
   const langKey = normalizeLanguageKey(language);
-  return WPS_TABLE[langKey] || 2.6;
+  return WPS_TABLE[langKey] || 2.5;
 }
 
 // ========== 문자열 처리 모듈 ==========
@@ -107,8 +106,8 @@ function normalizeNewlines(text) {
   const LF = String.fromCharCode(10);
   for (let i = 0; i < str.length; i++) {
     const code = str.charCodeAt(i);
-    if (code === 13) { // CR
-      if (str.charCodeAt(i + 1) === 10) i++; // CRLF -> LF
+    if (code === 13) {
+      if (str.charCodeAt(i + 1) === 10) i++;
       output += LF;
     } else {
       output += str[i];
@@ -123,7 +122,7 @@ function splitLines(text) {
   let buffer = "";
   for (let i = 0; i < normalized.length; i++) {
     const code = normalized.charCodeAt(i);
-    if (code === 10) { // LF
+    if (code === 10) {
       const trimmed = buffer.trim();
       if (trimmed) lines.push(trimmed);
       buffer = "";
@@ -148,7 +147,7 @@ function hasTag(text, tag) {
   return String(text).toUpperCase().indexOf(tag) >= 0;
 }
 
-// ========== 타이밍 파싱 모듈 (수정됨) ==========
+// ========== 타이밍 파싱 모듈 ==========
 function parseTimestamp(line) {
   const text = String(line || "").trim();
   if (text.length > 2 && text[0] === "[") {
@@ -193,7 +192,7 @@ function limitWordsPerLine(text, language) {
   const lines = splitLines(text);
   const output = [];
   const isKorean = String(language || "").toLowerCase().includes("ko");
-  const MAX_WORDS = isKorean ? 18 : 16;
+  const MAX_WORDS = isKorean ? 15 : 14;  // 더 짧게
   
   for (const line of lines) {
     const words = line.split(" ").filter(Boolean);
@@ -202,12 +201,10 @@ function limitWordsPerLine(text, language) {
   return output.join("\n");
 }
 
-// ========== 타이밍 재조정 모듈 (버그 수정) ==========
+// ========== 타이밍 재조정 모듈 ==========
 function retimeScript(script, totalSeconds, language) {
   try {
-    // 🐛 버그 수정: Math.round 위치 수정
     const duration = Math.max(1, Math.round((Number(totalSeconds) || 0) * 10) / 10);
-    console.log("Duration calculation:", { totalSeconds, duration }); // 디버깅용
     
     if (!script) return script;
     
@@ -281,124 +278,200 @@ function retimeScript(script, totalSeconds, language) {
   }
 }
 
-// ========== 개선된 스타일 예시 ==========
-function getStyleExamples() {
+// ========== 대폭 개선된 스타일 예시 및 프롬프트 ==========
+function getEnhancedStylePrompts(style, tone, language) {
+  const isKorean = language.toLowerCase().includes("ko");
+  
+  const stylePrompts = {
+    meme: {
+      structure: "Setup (2-3 lines) → Twist (1 line) → Punchline (1-2 lines)",
+      examples: [
+        "POV: You're still doing X manually... → Shows absurd old method → Plot twist: there's been an app for 5 years",
+        "Me: 'I'll sleep early tonight' → Also me at 3am: *doing random thing* → Why am I like this?",
+        "Nobody: ... → Absolutely nobody: ... → Me: *overreacting to minor thing*"
+      ],
+      tips: [
+        "Use relatable situations everyone experiences",
+        "Internet slang and casual language is perfect",
+        "Build anticipation then subvert expectations",
+        "Keep it snappy - no long explanations"
+      ]
+    },
+    
+    quicktip: {
+      structure: "Hook → 3-5 numbered tips → Quick summary",
+      examples: [
+        "Stop wasting hours on X → 1) Specific technique with result → 2) Tool/method with time saved → 3) Mindset shift → Try one today",
+        "X mistakes killing your Y → 1) Common mistake + fix → 2) Hidden problem + solution → 3) Pro tip → Which one are you doing?"
+      ],
+      tips: [
+        "Each tip must be actionable within 10 seconds",
+        "Include specific numbers/metrics when possible",
+        "Use 'Stop/Start/Try' action verbs",
+        "Tips should build on each other logically"
+      ]
+    },
+    
+    challenge: {
+      structure: "Challenge setup → Rules → Live attempt → Result/reaction",
+      examples: [
+        "I'll do X every time Y happens → *Rule explanation* → *Things start happening* → Final count: Z times",
+        "Can I survive a day without X? → Rules: no Y, no Z → *Struggle moments* → Plot twist ending"
+      ],
+      tips: [
+        "Make rules crystal clear upfront",
+        "Include real-time reactions and struggles",
+        "Build tension toward the outcome",
+        "End with unexpected result or learning"
+      ]
+    },
+    
+    storytelling: {
+      structure: "Hook → Rising action → Climax → Resolution",
+      examples: [
+        "The day that changed everything → Normal morning until... → Unexpected encounter → Life lesson learned",
+        "I thought I lost $X → Backstory of how → The panic moment → Plot twist resolution"
+      ],
+      tips: [
+        "Start in the middle of action",
+        "Use sensory details sparingly but effectively",
+        "Create emotional connection quickly",
+        "End with universal truth or lesson"
+      ]
+    },
+    
+    productplug: {
+      structure: "Problem agitation → Natural discovery → Demonstration → Results",
+      examples: [
+        "Spent 6 hours on X yesterday → Found this tool by accident → Here's how it works → Now takes 10 minutes",
+        "X was ruining my Y → Friend showed me Z → Quick demo → Game changer results"
+      ],
+      tips: [
+        "Lead with relatable pain point",
+        "Make discovery feel organic, not salesy",
+        "Show, don't just tell",
+        "Include specific before/after metrics"
+      ]
+    },
+    
+    faceless: {
+      structure: "Strong statement → Evidence/examples → Conclusion",
+      examples: [
+        "99% of people do X wrong → Here's what pros do instead → The science behind it → Start today",
+        "This one change 10x'd my results → The old way vs new way → Why it works → Your turn"
+      ],
+      tips: [
+        "Voice-over optimized: short, punchy sentences",
+        "No camera directions or visual cues",
+        "Focus on information density",
+        "Use power words and statistics"
+      ]
+    }
+  };
+
+  // Tone 조정
+  const toneAdjustments = {
+    Casual: "Use everyday language, contractions, and conversational flow",
+    Professional: "Clear, authoritative, but still accessible",
+    Friendly: "Warm, encouraging, like giving advice to a friend",
+    Humorous: "Add wit, wordplay, or unexpected comparisons",
+    Serious: "Direct, no-nonsense, focus on importance",
+    Enthusiastic: "High energy, exclamation points, motivational",
+    Neutral: "Balanced, informative, no strong emotion"
+  };
+
   return {
-    meme: [
-      "EXAMPLE (meme, 25s): [HOOK] POV: You're still editing videos one by one",
-      "Setup → Unexpected twist → Relatable punchline. Keep it 3-5 beats max."
-    ].join("\n"),
-    
-    quicktip: [
-      "EXAMPLE (quicktip, 30s): [HOOK] Stop wasting hours on video editing",
-      "1) Batch your filming sessions",
-      "2) Lock your camera settings", 
-      "3) Film all A-roll, then B-roll",
-      "[CTA] Try this and comment your results!"
-    ].join("\n"),
-    
-    challenge: [
-      "EXAMPLE (challenge, 30s): [HOOK] I'll do 100 pushups every time I mess up this recipe",
-      "Clear rules → Real-time attempt → Genuine reactions → Final outcome"
-    ].join("\n"),
-    
-    storytelling: [
-      "EXAMPLE (storytelling, 45s): [HOOK] I almost missed the most important meeting of my life",
-      "Incident → Rising tension → Unexpected turn → Satisfying resolution"
-    ].join("\n"),
-    
-    productplug: [
-      "EXAMPLE (productplug, 35s): [HOOK] This editing took me 6 hours before I found this tool",
-      "Real problem → Natural solution introduction → Quick demo → Clear CTA"
-    ].join("\n"),
-    
-    faceless: [
-      "EXAMPLE (faceless, 30s): [HOOK] These B-roll mistakes are killing your retention",
-      "Voice-over only, punchy lines, no camera directions needed"
-    ].join("\n")
+    style: stylePrompts[style] || stylePrompts.faceless,
+    tone: toneAdjustments[tone] || toneAdjustments.Neutral
   };
 }
 
-// ========== 개선된 시스템 프롬프트 생성 ==========
-function createSystemPrompt(styleKey, outputType) {
-  const styleExamples = getStyleExamples();
-  const styleHint = styleExamples[styleKey] || "";
+// ========== 완전히 새로운 시스템 프롬프트 ==========
+function createEnhancedSystemPrompt(style, tone, outputType, language) {
+  const prompts = getEnhancedStylePrompts(style, tone, language);
+  
+  const basePrompt = `You are a viral short-form video scriptwriter who has analyzed thousands of top-performing videos.
+Your scripts consistently achieve >80% retention rates.
 
-  let basePrompt = [
-    "You are an expert short-form video creator specializing in TikTok, Instagram Reels, and YouTube Shorts.",
-    "Create compelling scripts that maximize viewer retention and engagement.",
-    "Always write in the requested LANGUAGE. Return ONLY the script text—no JSON, markdown, or explanations.",
-    "",
-    "⏱️ TIMING REQUIREMENTS",
-    "- Target duration: TARGET_DURATION_SECONDS with roughly TARGET_WORDS_SOFT_CAP words",
-    "- Every line must have precise timestamp: [start-end] using ONE decimal place",
-    "- Time ranges must be contiguous: next start = previous end",
-    "- Final timestamp must equal TARGET_DURATION_SECONDS exactly",
-    "",
-    "📝 STRUCTURE REQUIREMENTS", 
-    "- Total: 6-9 lines (including HOOK and optional CTA)",
-    "- First line: [0.0-H] [HOOK] (H should be 10-15% of total duration)",
-    "- Body: 5-7 lines, each ≤16-18 words, one clear idea per line",
-    "- Optional final line: [C1-C2] [CTA] (if CTA=Yes, keep ≤8% of duration)",
-    "",
-    "🎯 CONTENT STRATEGY",
-    "- HOOK: Must create immediate curiosity or promise value",
-    "- BODY: Logical progression, specific details over vague adjectives", 
-    "- CTA: Natural, actionable, related to content",
-    "- Language: Conversational, platform-appropriate, avoid corporate speak",
-    "",
-    "🎬 STYLE GUIDELINES",
-    "- meme: Setup → twist → punchline (3-5 beats, internet slang OK)",
-    "- quicktip: 3-5 numbered actionable tips + summary",
-    "- challenge: Rules → attempt → real reactions → outcome",
-    "- storytelling: Incident → tension → twist → resolution", 
-    "- productplug: Problem → solution → proof → how-to → CTA",
-    "- faceless: Voice-over optimized, short punchy lines",
-    "",
-    styleHint
-  ].join("\n");
+CRITICAL RULES:
+1. Write ONLY in ${language}. No other language.
+2. Return ONLY the timestamped script. No JSON, no markdown, no explanations.
+3. Every line MUST have [start-end] timestamps with ONE decimal place
+4. Total duration must match TARGET_DURATION exactly
+
+VIRAL SCRIPT FORMULA:
+
+**${style.toUpperCase()} STYLE**
+Structure: ${prompts.style.structure}
+
+Key principles:
+${prompts.style.tips.map(tip => `• ${tip}`).join('\n')}
+
+Real examples that went viral:
+${prompts.style.examples.map((ex, i) => `Example ${i+1}: ${ex}`).join('\n')}
+
+TONE: ${prompts.tone}
+
+TIMING FORMULA:
+- Hook: 10-15% of total time (grab attention in first 2 seconds)
+- Body: 75-85% (value delivery, keep momentum)
+- CTA: 5-10% (if included, make it natural)
+
+ENGAGEMENT TACTICS:
+- Pattern interrupts every 5-7 seconds
+- Curiosity gaps that get answered
+- Specific > vague (numbers, examples, names)
+- Emotion triggers (surprise, validation, FOMO)
+- Open loops that close at the end
+
+LANGUAGE RULES:
+- One idea per line (cognitive load management)
+- Active voice only
+- Power words that trigger action
+- Remove ALL filler words
+- Conversational but authoritative`;
 
   if (outputType === "complete") {
-    basePrompt += [
-      "",
-      "🎬 IMPORTANT: This script will be used to generate additional production elements:",
-      "- Screen transitions and cut timing suggestions",
-      "- B-roll footage recommendations", 
-      "- Text overlay suggestions",
-      "- Sound effect recommendations",
-      "Consider visual storytelling and production needs when writing."
-    ].join("\n");
+    return basePrompt + `
+
+VISUAL AWARENESS:
+Since this will generate production elements, write with visual storytelling in mind:
+- Each line should suggest a clear visual
+- Include moments for B-roll opportunities
+- Natural transition points between ideas
+- Text overlay worthy phrases`;
   }
 
   return basePrompt;
 }
 
-// ========== 개선된 사용자 프롬프트 생성 ==========
-function createUserPrompt(params) {
+// ========== 개선된 사용자 프롬프트 ==========
+function createEnhancedUserPrompt(params) {
   const { text, style, tone, language, duration, wordsTarget, ctaInclusion } = params;
   
-  return [
-    `VIDEO IDEA: ${text}`,
-    `STYLE: ${style}`,
-    `TONE: ${tone}`,
-    `LANGUAGE: ${language}`,
-    `TARGET_DURATION_SECONDS: ${duration}`,
-    `TARGET_WORDS_SOFT_CAP: ${wordsTarget}`,
-    `CTA: ${ctaInclusion ? "Yes" : "No"}`,
-    `KEYWORDS (must appear ≥1 time): ${text.includes(",") ? text : "N/A"}`,
-    "",
-    "🎯 SPECIFIC REQUIREMENTS:",
-    "- Mention the VIDEO IDEA explicitly within first 2 lines",
-    "- Structure: [HOOK] → 5-7 body lines → optional [CTA]",
-    "- Use specific examples and concrete details",
-    "- Avoid generic adjectives, focus on unique value",
-    "",
-    "Write the complete timestamped script now:"
-  ].join("\n");
+  return `Create a ${style} style video script about: ${text}
+
+REQUIREMENTS:
+- Language: ${language} (MUST be in this language)
+- Duration: EXACTLY ${duration} seconds
+- Target words: ~${wordsTarget} words
+- Tone: ${tone}
+- Include CTA: ${ctaInclusion ? "Yes - make it natural and compelling" : "No"}
+
+SCRIPT STRUCTURE:
+- Lines: 6-9 total (including [HOOK] and optional [CTA])
+- First line: Must start with [HOOK] and create immediate curiosity
+- Body: Deliver on the hook's promise with escalating value
+- Last line: ${ctaInclusion ? "[CTA] with clear action" : "Strong closing statement"}
+
+The idea "${text}" must be explicitly addressed in the first 2 lines.
+Make it feel like the viewer discovered a secret.
+
+Write the complete timestamped script now:`;
 }
 
-// ========== 스마트 비주얼 요소 생성 모듈 (대폭 개선) ==========
-function generateVisualElements(script, videoIdea, style, duration) {
+// ========== 스마트 비주얼 요소 생성 (개선) ==========
+function generateEnhancedVisualElements(script, videoIdea, style, duration) {
   try {
     const lines = splitLines(script);
     const transitions = [];
@@ -406,12 +479,9 @@ function generateVisualElements(script, videoIdea, style, duration) {
     const textOverlays = [];
     const soundEffects = [];
 
-    // 비디오 아이디어 분석
     const ideaLower = videoIdea.toLowerCase();
-    const isWorkout = ideaLower.includes("workout") || ideaLower.includes("exercise") || ideaLower.includes("fitness");
-    const isCooking = ideaLower.includes("cook") || ideaLower.includes("recipe") || ideaLower.includes("food");
-    const isTech = ideaLower.includes("tech") || ideaLower.includes("app") || ideaLower.includes("phone") || ideaLower.includes("iphone");
-    
+    const contentType = detectContentType(ideaLower);
+
     lines.forEach((line, index) => {
       const timestamp = parseTimestamp(line);
       const content = stripTimePrefix(line);
@@ -421,191 +491,33 @@ function generateVisualElements(script, videoIdea, style, duration) {
       const { start, end } = timestamp;
       const isHook = hasTag(content, "[HOOK]");
       const isCTA = hasTag(content, "[CTA]");
-      const contentLower = content.toLowerCase();
 
-      // 🎬 스마트 Transitions 생성
+      // 전환 효과 (더 다양하고 스타일별 최적화)
       if (index > 0) {
-        let transitionType = "Clean cut";
-        let description = "Supporting visual";
-
-        if (style === "quicktip") {
-          if (contentLower.includes("first") || contentLower.includes("1")) {
-            transitionType = "Slide transition";
-            description = isWorkout ? "Exercise demo setup" : isCooking ? "Ingredient preparation" : "Step 1 demonstration";
-          } else if (contentLower.includes("next") || contentLower.includes("2")) {
-            transitionType = "Quick cut";
-            description = isWorkout ? "Exercise form focus" : isCooking ? "Cooking technique closeup" : "Step 2 action shot";
-          } else if (contentLower.includes("then") || contentLower.includes("3")) {
-            transitionType = "Smooth fade";
-            description = isWorkout ? "New exercise transition" : isCooking ? "Process transition" : "Step 3 overview";
-          } else if (contentLower.includes("follow") || contentLower.includes("4")) {
-            transitionType = "Zoom in";
-            description = isWorkout ? "Form correction detail" : isCooking ? "Critical technique" : "Important detail";
-          } else if (contentLower.includes("finally") || contentLower.includes("5")) {
-            transitionType = "Dramatic cut";
-            description = isWorkout ? "Final exercise power" : isCooking ? "Final result reveal" : "Completion shot";
-          }
-        } else if (style === "meme") {
-          transitionType = "Jump cut";
-          description = "Reaction shot or punchline setup";
-        } else if (style === "storytelling") {
-          transitionType = "Cross dissolve";
-          description = "Scene or time transition";
-        } else if (style === "challenge") {
-          transitionType = "Quick cut";
-          description = "Action intensity or reaction";
-        }
-        
+        const transition = getSmartTransition(style, index, content, contentType);
         transitions.push({
           time: `${start.toFixed(1)}s`,
-          type: transitionType,
-          description: description
+          type: transition.type,
+          description: transition.description
         });
       }
 
-      // 🎥 스마트 B-Roll 생성
+      // B-Roll (더 구체적이고 실용적)
       if (!isHook && !isCTA) {
-        let bRollContent = "Supporting demonstration footage";
-
-        if (isWorkout) {
-          if (contentLower.includes("jumping jacks")) {
-            bRollContent = "Jumping jacks demonstration - proper form, rhythm, breathing technique";
-          } else if (contentLower.includes("push-ups") || contentLower.includes("pushup")) {
-            bRollContent = "Push-up form guide - hand placement, body alignment, modification options";
-          } else if (contentLower.includes("plank")) {
-            bRollContent = "Plank position demo - core engagement, body line, common mistakes";
-          } else if (contentLower.includes("squats")) {
-            bRollContent = "Squat technique - depth, knee tracking, muscle activation";
-          } else if (contentLower.includes("high knees")) {
-            bRollContent = "High knees cardio - pace, knee height, arm movement";
-          } else {
-            bRollContent = "Full body workout montage - energy, movement, transformation";
-          }
-        } else if (isCooking) {
-          if (contentLower.includes("pasta")) {
-            bRollContent = "Pasta cooking process - boiling water, timing, texture check";
-          } else if (contentLower.includes("ingredient")) {
-            bRollContent = "Fresh ingredients showcase - quality, preparation, arrangement";
-          } else {
-            bRollContent = "Cooking process shots - hands, tools, ingredients, steam";
-          }
-        } else if (isTech) {
-          if (contentLower.includes("iphone") || contentLower.includes("phone")) {
-            bRollContent = "iPhone close-ups - design details, interface, user interaction";
-          } else if (contentLower.includes("app")) {
-            bRollContent = "App interface navigation - smooth scrolling, feature highlights";
-          } else {
-            bRollContent = "Technology demonstration - clean setup, professional lighting";
-          }
-        } else {
-          // 기본값도 더 구체적으로
-          if (contentLower.includes("1") || contentLower.includes("first")) {
-            bRollContent = "Step 1 detailed demonstration with clear visual focus";
-          } else if (contentLower.includes("2") || contentLower.includes("second")) {
-            bRollContent = "Step 2 process shots with technique emphasis";
-          } else if (contentLower.includes("3") || contentLower.includes("third")) {
-            bRollContent = "Step 3 execution with results preview";
-          }
-        }
-
+        const bRollContent = getSmartBRoll(content, contentType, style);
         bRoll.push({
           timeRange: `${start.toFixed(1)}-${end.toFixed(1)}s`,
           content: bRollContent
         });
       }
 
-      // 💬 스마트 Text Overlays 생성
-      if (isHook) {
-        const hookText = extractKeyPhrase(content);
-        textOverlays.push({
-          time: `${start.toFixed(1)}s`,
-          text: hookText,
-          style: "Bold hook title"
-        });
-      } else if (style === "quicktip") {
-        // 운동이나 팁별로 숫자 오버레이 생성
-        if (contentLower.includes("first") || contentLower.includes("1")) {
-          textOverlays.push({
-            time: `${start.toFixed(1)}s`,
-            text: isWorkout ? "💪 EXERCISE 1" : "✨ TIP #1",
-            style: "Number highlight"
-          });
-        } else if (contentLower.includes("next") || contentLower.includes("2")) {
-          textOverlays.push({
-            time: `${start.toFixed(1)}s`,
-            text: isWorkout ? "💪 EXERCISE 2" : "✨ TIP #2",
-            style: "Number highlight"
-          });
-        } else if (contentLower.includes("then") || contentLower.includes("3")) {
-          textOverlays.push({
-            time: `${start.toFixed(1)}s`,
-            text: isWorkout ? "💪 EXERCISE 3" : "✨ TIP #3",
-            style: "Number highlight"
-          });
-        } else if (contentLower.includes("follow") || contentLower.includes("4")) {
-          textOverlays.push({
-            time: `${start.toFixed(1)}s`,
-            text: isWorkout ? "💪 EXERCISE 4" : "✨ TIP #4",
-            style: "Number highlight"
-          });
-        } else if (contentLower.includes("finally") || contentLower.includes("5")) {
-          textOverlays.push({
-            time: `${start.toFixed(1)}s`,
-            text: isWorkout ? "💪 FINAL MOVE" : "✨ TIP #5",
-            style: "Number highlight"
-          });
-        }
-        
-        // 운동별 시간 표시
-        if (contentLower.includes("minute")) {
-          textOverlays.push({
-            time: `${(start + 0.5).toFixed(1)}s`,
-            text: "⏱️ 1 MIN",
-            style: "Timer overlay"
-          });
-        }
-      } else if (isCTA) {
-        textOverlays.push({
-          time: `${start.toFixed(1)}s`,
-          text: isWorkout ? "💪 TRY IT!" : isCooking ? "👨‍🍳 COOK IT!" : "👆 DO THIS",
-          style: "Call-to-action prompt"
-        });
-      }
+      // 텍스트 오버레이 (더 임팩트 있게)
+      const overlays = getSmartOverlays(content, start, isHook, isCTA, style, index);
+      textOverlays.push(...overlays);
 
-      // 🔊 스마트 Sound Effects 생성
-      if (isHook) {
-        soundEffects.push({
-          time: `${start.toFixed(1)}s`,
-          effect: isWorkout ? "Energetic workout intro sound" : "Attention grab sound"
-        });
-      } else if (style === "quicktip" && index > 0 && index < lines.length - 1) {
-        if (contentLower.includes("jumping jacks")) {
-          soundEffects.push({
-            time: `${start.toFixed(1)}s`,
-            effect: "Cardio beat sound"
-          });
-        } else if (contentLower.includes("push-ups")) {
-          soundEffects.push({
-            time: `${start.toFixed(1)}s`,
-            effect: "Strength training thud"
-          });
-        } else if (contentLower.includes("plank")) {
-          soundEffects.push({
-            time: `${start.toFixed(1)}s`,
-            effect: "Focus/concentration tone"
-          });
-        } else {
-          soundEffects.push({
-            time: `${start.toFixed(1)}s`,
-            effect: "Tip transition sound"
-          });
-        }
-      } else if (isCTA) {
-        soundEffects.push({
-          time: `${start.toFixed(1)}s`,
-          effect: "Call-to-action chime"
-        });
-      }
+      // 사운드 효과 (더 다이나믹하게)
+      const sounds = getSmartSounds(content, start, isHook, isCTA, style, index);
+      soundEffects.push(...sounds);
     });
 
     return { transitions, bRoll, textOverlays, soundEffects };
@@ -615,29 +527,196 @@ function generateVisualElements(script, videoIdea, style, duration) {
   }
 }
 
-function extractKeyPhrase(content) {
-  let cleaned = stripTimePrefix(content).replace("[HOOK]", "").replace("[CTA]", "").trim();
-  
-  // 질문 형태 추출
-  if (cleaned.includes("?")) {
-    const question = cleaned.split("?")[0] + "?";
-    return question.length <= 30 ? question : question.split(" ").slice(0, 4).join(" ") + "?";
-  }
-  
-  // "Got 5 minutes?" 같은 패턴
-  if (cleaned.toLowerCase().startsWith("got ")) {
-    const words = cleaned.split(" ");
-    return words.slice(0, 3).join(" ") + "?";
-  }
-  
-  // 일반적인 경우 - 첫 3-4단어
-  const words = cleaned.split(" ").filter(Boolean);
-  return words.slice(0, Math.min(4, words.length)).join(" ");
+function detectContentType(ideaLower) {
+  if (ideaLower.includes("workout") || ideaLower.includes("exercise") || ideaLower.includes("fitness")) return "fitness";
+  if (ideaLower.includes("cook") || ideaLower.includes("recipe") || ideaLower.includes("food")) return "cooking";
+  if (ideaLower.includes("tech") || ideaLower.includes("app") || ideaLower.includes("phone")) return "tech";
+  if (ideaLower.includes("business") || ideaLower.includes("money") || ideaLower.includes("career")) return "business";
+  if (ideaLower.includes("travel") || ideaLower.includes("destination")) return "travel";
+  return "general";
 }
 
-// ========== OpenAI API 호출 모듈 ==========
-async function callOpenAI(systemPrompt, userPrompt, config) {
+function getSmartTransition(style, index, content, contentType) {
+  const transitions = {
+    meme: ["Jump cut", "Crash zoom", "Glitch effect", "Speed ramp"],
+    quicktip: ["Smooth slide", "Number pop", "Clean cut", "Zoom transition"],
+    challenge: ["Quick cut", "Speed ramp", "Whip pan", "Match cut"],
+    storytelling: ["Cross dissolve", "Fade", "J-cut", "L-cut"],
+    productplug: ["Product reveal", "Before/after wipe", "Zoom in", "Smooth transition"],
+    faceless: ["Clean cut", "Fade transition", "Slide", "Morph"]
+  };
+
+  const styleTransitions = transitions[style] || transitions.faceless;
+  const selectedTransition = styleTransitions[index % styleTransitions.length];
+
+  return {
+    type: selectedTransition,
+    description: `${contentType} content transition - ${selectedTransition.toLowerCase()} for impact`
+  };
+}
+
+function getSmartBRoll(content, contentType, style) {
+  const contentLower = content.toLowerCase();
+  
+  const bRollMap = {
+    fitness: {
+      keywords: ["pushup", "plank", "squat", "cardio", "stretch"],
+      default: "Exercise demonstration with proper form and multiple angles"
+    },
+    cooking: {
+      keywords: ["chop", "mix", "heat", "season", "plate"],
+      default: "Ingredient close-ups, cooking process, steam shots, final plating"
+    },
+    tech: {
+      keywords: ["app", "feature", "setting", "trick", "hack"],
+      default: "Screen recording, UI navigation, feature highlights, results"
+    },
+    business: {
+      keywords: ["strategy", "growth", "profit", "customer", "market"],
+      default: "Charts, graphs, workspace shots, success metrics visualization"
+    },
+    general: {
+      keywords: [],
+      default: "Relevant footage matching the current narrative beat"
+    }
+  };
+
+  const contentMap = bRollMap[contentType] || bRollMap.general;
+  
+  for (const keyword of contentMap.keywords) {
+    if (contentLower.includes(keyword)) {
+      return `${keyword.toUpperCase()} footage - multiple angles, slow-mo highlights, detail shots`;
+    }
+  }
+  
+  return contentMap.default;
+}
+
+function getSmartOverlays(content, start, isHook, isCTA, style, index) {
+  const overlays = [];
+  
+  if (isHook) {
+    const hookText = extractPowerPhrase(content);
+    overlays.push({
+      time: `${start.toFixed(1)}s`,
+      text: hookText,
+      style: "Bold hook - animated entrance, high contrast"
+    });
+  } else if (isCTA) {
+    overlays.push({
+      time: `${start.toFixed(1)}s`,
+      text: getStyleCTA(style),
+      style: "CTA button animation - pulse effect"
+    });
+  } else if (style === "quicktip" && index > 0 && index < 6) {
+    overlays.push({
+      time: `${start.toFixed(1)}s`,
+      text: `TIP #${index}`,
+      style: "Number badge - slide in from left"
+    });
+  }
+  
+  // 강조 단어 추출
+  const powerWords = extractEmphasisWords(content);
+  if (powerWords.length > 0) {
+    overlays.push({
+      time: `${(start + 0.2).toFixed(1)}s`,
+      text: powerWords[0].toUpperCase(),
+      style: "Emphasis word - scale up animation"
+    });
+  }
+  
+  return overlays;
+}
+
+function getSmartSounds(content, start, isHook, isCTA, style, index) {
+  const sounds = [];
+  
+  if (isHook) {
+    sounds.push({
+      time: `${start.toFixed(1)}s`,
+      effect: style === "meme" ? "Vine boom or meme sound" : "Attention grabber - whoosh or impact"
+    });
+  } else if (isCTA) {
+    sounds.push({
+      time: `${start.toFixed(1)}s`,
+      effect: "CTA chime - positive notification sound"
+    });
+  } else if (style === "quicktip" && index > 0) {
+    sounds.push({
+      time: `${start.toFixed(1)}s`,
+      effect: `Tip transition ${index} - subtle swoosh`
+    });
+  }
+  
+  // 패턴 기반 사운드
+  const contentLower = content.toLowerCase();
+  if (contentLower.includes("but") || contentLower.includes("however")) {
+    sounds.push({
+      time: `${(start + 0.1).toFixed(1)}s`,
+      effect: "Plot twist sound - record scratch or pause"
+    });
+  }
+  
+  return sounds;
+}
+
+function extractPowerPhrase(content) {
+  const cleaned = content.replace("[HOOK]", "").replace("[CTA]", "").trim();
+  
+  // 질문 형태
+  if (cleaned.includes("?")) {
+    return cleaned.split("?")[0] + "?";
+  }
+  
+  // 숫자가 있으면 포함
+  const numberMatch = cleaned.match(/\d+/);
+  if (numberMatch) {
+    const words = cleaned.split(" ");
+    const numberIndex = words.findIndex(w => w.includes(numberMatch[0]));
+    return words.slice(Math.max(0, numberIndex - 1), numberIndex + 2).join(" ");
+  }
+  
+  // 첫 3-4 단어
+  return cleaned.split(" ").slice(0, 4).join(" ");
+}
+
+function extractEmphasisWords(content) {
+  const powerWords = [
+    "never", "always", "secret", "hack", "trick", "mistake",
+    "stop", "start", "now", "today", "free", "easy", "fast",
+    "proven", "guaranteed", "instant", "revolutionary"
+  ];
+  
+  const contentLower = content.toLowerCase();
+  return powerWords.filter(word => contentLower.includes(word));
+}
+
+function getStyleCTA(style) {
+  const ctas = {
+    meme: "😂 TAG A FRIEND",
+    quicktip: "💡 TRY THIS NOW",
+    challenge: "🔥 YOUR TURN",
+    storytelling: "💭 SHARE YOUR STORY",
+    productplug: "🚀 GET STARTED",
+    faceless: "📌 SAVE THIS"
+  };
+  return ctas[style] || "👆 TAKE ACTION";
+}
+
+// ========== OpenAI API 호출 모듈 (온도 조정) ==========
+async function callOpenAI(systemPrompt, userPrompt, config, style) {
   const { OPENAI_API_KEY, OPENAI_MODEL, HARD_TIMEOUT_MS } = config;
+  
+  // 스타일별 온도 조정
+  const temperatures = {
+    meme: 0.7,      // 더 창의적
+    challenge: 0.6,  // 약간 창의적
+    storytelling: 0.5,
+    quicktip: 0.3,   // 더 일관성 있게
+    productplug: 0.4,
+    faceless: 0.3
+  };
   
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HARD_TIMEOUT_MS);
@@ -651,9 +730,11 @@ async function callOpenAI(systemPrompt, userPrompt, config) {
       },
       body: JSON.stringify({
         model: OPENAI_MODEL,
-        temperature: 0.4,
+        temperature: temperatures[style] || 0.4,
         top_p: 0.9,
-        max_tokens: 700,
+        max_tokens: 800,
+        presence_penalty: 0.1,  // 반복 감소
+        frequency_penalty: 0.2,  // 다양성 증가
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
@@ -716,7 +797,7 @@ module.exports = async (req, res) => {
       outputType = "script"
     } = body;
 
-    console.log("Request body:", body); // 디버깅용
+    console.log("Request received:", { text, style, length, tone, language, outputType });
 
     // 입력 검증
     if (!text || typeof text !== "string") {
@@ -726,23 +807,21 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: "`style` is required" });
     }
 
-    // 🐛 매개변수 정규화 (버그 수정)
+    // 매개변수 정규화
     const duration = Math.max(15, Math.min(Number(length) || 45, 180));
-    console.log("Duration normalization:", { length, duration }); // 디버깅용
-    
     const wps = getWordsPerSecond(language);
     const wordsTarget = Math.round(duration * wps);
     const styleKey = String(style || "").toLowerCase();
     const output = String(outputType || "script").toLowerCase();
 
-    // 프롬프트 생성
-    const systemPrompt = createSystemPrompt(styleKey, output);
-    const userPrompt = createUserPrompt({
-      text, style, tone, language, duration, wordsTarget, ctaInclusion
+    // 향상된 프롬프트 생성
+    const systemPrompt = createEnhancedSystemPrompt(styleKey, tone, output, language);
+    const userPrompt = createEnhancedUserPrompt({
+      text, style: styleKey, tone, language, duration, wordsTarget, ctaInclusion
     });
 
     // AI 호출
-    const rawScript = await callOpenAI(systemPrompt, userPrompt, config);
+    const rawScript = await callOpenAI(systemPrompt, userPrompt, config, styleKey);
     
     // 후처리
     const limitedScript = limitWordsPerLine(rawScript, language);
@@ -750,8 +829,7 @@ module.exports = async (req, res) => {
 
     // 응답 생성
     if (output === "complete") {
-      // Complete Package: 스크립트 + 스마트 비주얼 요소
-      const visualElements = generateVisualElements(finalScript, text, styleKey, duration);
+      const visualElements = generateEnhancedVisualElements(finalScript, text, styleKey, duration);
       
       return res.status(200).json({
         result: {
@@ -760,7 +838,6 @@ module.exports = async (req, res) => {
         }
       });
     } else {
-      // Script Only: 기존 방식
       return res.status(200).json({ result: finalScript });
     }
 
