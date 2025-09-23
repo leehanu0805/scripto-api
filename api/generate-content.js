@@ -1,12 +1,11 @@
-// api/generate-content.js — 하이엔드 최종판 (모델 버전 유지: 기본 gpt-4o-mini)
-// - 안정성: 바디 사이즈 제한, 스키마 검증, CORS 정책 옵션화
-// - 품질: 팩트가드(라이트/스트릭트), 클리셰 다국어 필터, 카테고리 감지 개선(LoL 오검출 방지)
-// - 타이밍: 최소 세그먼트 길이, 부동소수 정밀 보정
-// - 운영성: DEBUG 로깅 강화, OPENAI_BASE_URL 지원
+// api/generate-content.js — 하이엔드 최종판 (항상 VIRAL 모드)
+// ✅ 모델 버전 고정: 기본 gpt-4o-mini (환경변수 OPENAI_MODEL로만 변경 가능)
+// ✅ 목표: 어떤 상황에서도 때려 박는 바이럴 톤 + 깔끔한 줄바꿈
+// ✅ 포함: 보안/안정성(바디 제한, CORS), 고품질 프롬프트, 타이밍 엔진, 비주얼 가이드
 "use strict";
 
 /* ============================== 유틸 상수 ============================== */
-const DEFAULT_MODEL = "gpt-4o-mini"; // (사용자 요청: 변경 금지, OPENAI_MODEL 환경변수 기본값으로만 사용)
+const DEFAULT_MODEL = "gpt-4o-mini"; // (변경 금지, 환경변수로만 오버라이드)
 const MAX_BODY_BYTES = Math.max(256_000, Math.min(Number(process.env.MAX_BODY_BYTES) || 1_000_000, 5_000_000)); // 256KB~5MB
 const MIN_DURATION = 15;
 const MAX_DURATION = 180;
@@ -38,7 +37,6 @@ function setupCORS(req, res) {
   const hasOrigin = !!requestOrigin;
   const listEmpty = ALLOW_LIST.length === 0;
 
-  // origin 없는 서버-서버 호출 처리 정책
   if (!hasOrigin && !allowServerNoOrigin && !allowAll && !listEmpty) {
     return false;
   }
@@ -51,7 +49,6 @@ function setupCORS(req, res) {
   if (allowAll) {
     res.setHeader("Access-Control-Allow-Origin", "*");
   } else if (listEmpty) {
-    // 리스트 비었으면 요청 origin 있으면 reflect, 없으면 안전하게 deny → 필요 시 옵션으로 허용
     if (hasOrigin) {
       res.setHeader("Access-Control-Allow-Origin", requestOrigin);
     } else if (allowServerNoOrigin) {
@@ -71,7 +68,7 @@ function setupCORS(req, res) {
 function getConfig() {
   return {
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-    OPENAI_MODEL: process.env.OPENAI_MODEL || DEFAULT_MODEL, // 모델명 기본값 유지
+    OPENAI_MODEL: process.env.OPENAI_MODEL || DEFAULT_MODEL, // gpt-4o-mini 유지
     OPENAI_BASE_URL: process.env.OPENAI_BASE_URL || "https://api.openai.com",
     HARD_TIMEOUT_MS: Math.max(15000, Math.min(Number(process.env.HARD_TIMEOUT_MS) || 30000, 120000)),
     DEBUG_ERRORS: process.env.DEBUG_ERRORS === "1" || process.env.DEBUG_ERRORS === "true"
@@ -97,14 +94,9 @@ function readRawBody(req, limitBytes = MAX_BODY_BYTES) {
 }
 
 async function parseRequestBody(req) {
-  // 이미 미들웨어에서 파싱되어 객체일 수 있음
   if (req.body && typeof req.body === "object") return req.body;
-
   const ctype = (req.headers["content-type"] || "").toLowerCase();
-  if (!ctype.includes("application/json")) {
-    // JSON이 아니면 빈 객체
-    return {};
-  }
+  if (!ctype.includes("application/json")) return {};
   const raw = await readRawBody(req).catch((err) => { throw err; });
   try { return JSON.parse(raw || "{}"); } catch { return {}; }
 }
@@ -112,7 +104,7 @@ async function parseRequestBody(req) {
 /* ============================== 언어/속도 ============================== */
 function normalizeLanguageKey(language) {
   const L0 = String(language || "").trim().toLowerCase();
-  const L = L0.replace(/[_-]([a-z]{2})$/i, ""); // ko-KR -> ko, en-US -> en
+  const L = L0.replace(/[_-]([a-z]{2})$/i, ""); // ko-KR -> ko
   if (L.includes("korean") || L.includes("한국") || L === "ko") return "ko";
   if (L.includes("english") || L === "en") return "en";
   if (L.includes("spanish") || L === "es") return "es";
@@ -181,7 +173,7 @@ function stripTimePrefix(line) {
   return text;
 }
 
-/* ============================== 카테고리/후크/클리셰 ============================== */
+/* ============================== 카테고리/후크 데이터 ============================== */
 function detectCategory(idea) {
   const s = String(idea || "").toLowerCase();
   if (/\bvalorant\b/.test(s) || /\bgame\b/.test(s) || /\bleague of legends\b/.test(s) || /\blol\b(?!\w)/.test(s)) return "gaming";
@@ -233,126 +225,7 @@ function getViralHookFormulasByCategory(category) {
   return base[category] || base.general;
 }
 
-function getBannedPhrases(languageKey = "en") {
-  // 다국어 클리셰(정규식 패턴 허용)
-  const ko = [
-    "놓친 비밀이 있습니다",
-    "모든 것을 경험",
-    "완전히 바꿨습니다",
-    "게임 체인저",
-    "혁명적인",
-    "놀라운 사실",
-    "충격적인 진실",
-    "이것 하나로",
-    "단 하나의",
-    "믿기 어려운",
-    "절대 후회하지 않을"
-  ];
-  const en = [
-    "game[ -]?changer",
-    "revolutionary",
-    "mind[ -]?blowing",
-    "you won'?t believe",
-    "secret they don'?t want you to know",
-    "shocking truth",
-    "this changes everything",
-    "never seen before",
-    "the ultimate hack",
-    "insane trick"
-  ];
-  // 기본: KO + EN 동시 차단(언어 혼용 대비)
-  return languageKey === "ko" ? ko.concat(en) : ko.concat(en);
-}
-
-/* ============================== 시스템/유저 프롬프트 ============================== */
-function createViralSystemPrompt(style, tone, outputType, language, videoIdea) {
-  const langKey = normalizeLanguageKey(language);
-  const category = detectCategory(videoIdea);
-  const hooks = getViralHookFormulasByCategory(category);
-  const bannedPhrases = getBannedPhrases(langKey);
-
-  return `You are a viral content strategist who has analyzed 10,000+ viral videos.
-Your scripts have an 85% retention rate average.
-
-MANDATORY LANGUAGE: ${language} - Write ONLY in this language.
-
-VIRAL HOOK FORMULAS FOR THIS VIDEO:
-${hooks.map((h, i) => `${i + 1}. ${h}`).join("\n")}
-
-BANNED CLICHÉ PHRASES (NEVER USE):
-${bannedPhrases.map(p => `• ${p}`).join("\n")}
-
-${String(style).toUpperCase()} STYLE REQUIREMENTS:
-
-For ${style}, follow this EXACT structure:
-
-MEME STYLE:
-Line 1: Relatable scenario everyone knows
-Line 2-3: Build up the absurdity
-Line 4: Unexpected twist
-Line 5: Self-aware punchline
-Example: "POV: You say 'one more game' → It's now 4am → You have work at 7 → You queue again → Why are we like this?"
-
-QUICKTIP STYLE:
-Line 1: Problem agitation (make them feel the pain)
-Line 2-5: Numbered solutions with SPECIFIC details
-Line 6: Result they'll get
-Example: "Stop wasting 3 hours editing → 1) Batch all clips first → 2) One LUT for everything → 3) Template your intros → Done in 20 minutes"
-
-CHALLENGE STYLE:
-Line 1: Impossible-sounding challenge
-Line 2: Stakes/consequences
-Line 3-5: Real attempts with reactions
-Line 6: Unexpected outcome
-Example: "100 pushups for every death in ranked → I'm hardstuck Bronze → First game: 12 deaths → My arms are gone → Plot twist: I ranked up"
-
-STORYTELLING STYLE:
-Line 1: Start at the climax moment
-Line 2-3: Quick context flashback
-Line 4: The turning point
-Line 5: Lesson that hits different
-Example: "I almost deleted my channel → 6 months, 12 subscribers → Then this one video → 100k views overnight → Consistency isn't sexy but it works"
-
-PRODUCTPLUG STYLE:
-Line 1: Painful problem everyone has
-Line 2: Failed attempts to solve it
-Line 3: Discovery moment (organic)
-Line 4: Specific demonstration
-Line 5: Measurable results
-Example: "Editing took me 6 hours per video → Tried 5 different apps, all trash → Friend showed me X → Watch this workflow → Now it's 30 minutes max"
-
-FACELESS STYLE:
-Line 1: Controversial/surprising statement
-Line 2-3: Evidence/proof points
-Line 4: Counter-intuitive insight
-Line 5: Call to action
-Example: "99% use their phone wrong → Studies show X causes Y → But nobody talks about Z → Here's what to do instead → Save this before it's gone"
-
-CRITICAL REQUIREMENTS:
-1. First 3 seconds must create curiosity gap
-2. Use specific numbers, not vague claims
-3. Include pattern interrupts every 5 seconds
-4. Reference current events/trends when relevant
-5. End with open loop or compelling CTA
-
-TONE: ${tone}
-- Casual: Use slang, contractions, conversational
-- Professional: Authoritative but accessible
-- Humorous: Self-aware, unexpected comparisons
-- Enthusiastic: High energy without being fake
-
-For ${category} content specifically:
-- Use insider terminology correctly
-- Reference recent updates/changes accurately
-- Address actual community pain points
-- Avoid outdated information
-
-TIMING:
-- Hook: Exactly 10-15% of total duration
-- Each line: Maximum 4 seconds to read
-- Pauses built into timestamps for emphasis`;
-}
-
+/* ============================== 프롬프트(항상 VIRAL) ============================== */
 function keywordsFromText(text) {
   const arr = String(text || "")
     .toLowerCase()
@@ -361,82 +234,78 @@ function keywordsFromText(text) {
   return arr.length ? arr : ["topic"];
 }
 
+function createViralSystemPrompt(style, tone, outputType, language, videoIdea) {
+  const category = detectCategory(videoIdea);
+  const hooks = getViralHookFormulasByCategory(category);
+
+  return `You are a viral content strategist who has analyzed 10,000+ viral videos.
+Your scripts drive extreme retention on short-form platforms.
+
+MANDATORY LANGUAGE: ${language} — Write ONLY in this language.
+
+VIRAL HOOK FORMULAS FOR THIS VIDEO:
+${hooks.map((h, i) => `${i + 1}. ${h}`).join("\n")}
+
+ALWAYS VIRAL MODE — OVERRIDES:
+- Open with a punchy, polarizing hook (strong POV) in ≤12 words.
+- Use vivid specifics, cultural references, and internet-native phrasing (emoji OK).
+- Pattern interrupts every ~5 seconds: contrasts, questions, twist reveals.
+- Prefer short, punchy sentences. Cut filler. Keep it fast.
+- Accept tasteful hyperbole and humor. Avoid harmful misinformation.
+- If a stat is uncertain, imply source type (e.g., "patch notes", "creator reports").
+
+STYLE GUIDE (as flexible references, remix allowed):
+- MEME: Relatable → Escalate absurdity → Twist → Self-aware punchline
+- QUICKTIP: Pain → 3–4 ultra-specific fixes → Outcome
+- CHALLENGE: Bold challenge → Stakes → Attempts → Outcome
+- STORYTELLING: Start at climax → Flashback → Turning point → Lesson
+- PRODUCTPLUG: Pain → Failed tries → Discovery → Demo → Result
+- FACELESS: Spicy claim → Evidence → Counter-intuitive insight → CTA
+
+CRITICAL REQUIREMENTS:
+1) Hook creates curiosity gap within 3 seconds
+2) Use specific numbers or named entities when real
+3) End with an open loop or compelling CTA when requested
+
+TIMING RULES:
+- Hook: ~10–15% of duration
+- Each line: ≤4 seconds
+- Include micro-pauses (reader will add line breaks)`;
+}
+
 function createViralUserPrompt(params) {
   const { text, style, tone, language, duration, wordsTarget, ctaInclusion } = params;
   const keywords = keywordsFromText(text);
   return `VIDEO BRIEF: ${text}
 
-STRICT REQUIREMENTS:
+STRICT OUTPUT RULES:
 - Language: ${language}
 - Duration: EXACTLY ${duration} seconds
-- Word count: ~${wordsTarget} words (adjust for natural pacing)
-- Include CTA: ${ctaInclusion ? "Yes - organic and compelling" : "No"}
+- Word count: ~${wordsTarget} words
+- Include CTA: ${ctaInclusion ? "Yes (organic, strong)" : "No"}
 
 MUST INCLUDE:
-- Specific reference to "${keywords[0]}" in first line
-- Current/recent information only (2024-2025)
-- Pattern interrupt every 5-7 seconds
+- Reference to "${keywords[0]}" in the first line
+- Current/recent information only (2024–2025)
+- Pattern interrupt every 5–7 seconds
 - One surprising fact or stat
 - Clear value proposition within 10 seconds
 
 STRUCTURE:
-Total lines: 6-8 (including [HOOK] and optional [CTA])
-Format: [start-end] text (one decimal place)
+- Total lines: 6–8 (including [HOOK] and optional [CTA])
+- Format per line: [start-end] text (one decimal place)
+- Keep sentences SHORT. Prefer bold, fast punches.
 
 DO NOT:
-- Make up features or updates
-- Use generic phrases
-- Include filler words
-- Be vague about benefits
+- Invent fake updates
+- Be generic or vague
+- Add filler words
 
 Create the timestamped script now:`;
 }
 
-/* ============================== 팩트가드/클리셰 필터 ============================== */
-function applyClicheFilter(text, languageKey) {
-  if (!text) return text;
-  const banned = getBannedPhrases(languageKey);
-  let filtered = text;
-  for (const phrase of banned) {
-    const rx = new RegExp(phrase, "gi");
-    filtered = filtered.replace(rx, "");
-  }
-  // 잔여 이중 공백/구두점 정리
-  return filtered.replace(/\s{2,}/g, " ").replace(/\s+([.,!?;:\]])/g, "$1").trim();
-}
-
-function lightFactGuard(text) {
-  if (!text) return text;
-  return text
-    // 절대화 표현 완곡화
-    .replace(/\b(always|never|everyone|nobody|100%\b|never ever)\b/gi, (m) => `${m}*`)
-    // 도발적 과장 문구 톤다운
-    .replace(/\b(insane|crazy|unbelievable|impossible)\b/gi, (m) => `${m} (sort of)`)
-    // 과감한 단정 전환
-    .replace(/\b(guaranteed|proven)\b/gi, (m) => `${m} (context-dependent)`)
-    .replace(/\s{2,}/g, " ")
-    .trim();
-}
-
-function strictFactGuard(text) {
-  if (!text) return text;
-  // 숫자/퍼센트/날짜/절대 표현에 [검증필요] 태그
-  return text
-    .replace(/\b(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(%|\b)/g, "$1$2[검증필요]")
-    .replace(/\b(20\d{2}|19\d{2})\b/g, "$1[검증필요]")
-    .replace(/\b(always|never|everyone|nobody)\b/gi, (m) => `${m}[검증필요]`)
-    .replace(/\s{2,}/g, " ")
-    .trim();
-}
-
-function runFactGuard(text, mode = "light") {
-  if (mode === "strict") return strictFactGuard(text);
-  if (mode === "light") return lightFactGuard(text);
-  return text;
-}
-
 /* ============================== 타이밍 재분배 ============================== */
-function retimeScript(script, totalSeconds, language) {
+function retimeScript(script, totalSeconds) {
   try {
     const duration = Math.max(1, DEC(Number(totalSeconds) || 0));
     if (!script) return script;
@@ -448,7 +317,6 @@ function retimeScript(script, totalSeconds, language) {
       const m = line.match(/\[\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*\]/);
       const textOnly = stripTimePrefix(line);
       return {
-        raw: line,
         text: textOnly,
         isHook: /\[HOOK\]/i.test(textOnly),
         isCTA: /\[CTA\]/i.test(textOnly),
@@ -456,10 +324,9 @@ function retimeScript(script, totalSeconds, language) {
       };
     });
 
-    // 첫 줄 [HOOK] 보장
+    // 첫 줄은 반드시 [HOOK]
     if (!items[0].isHook && items[0].text) {
       items[0].text = "[HOOK] " + items[0].text;
-      items[0].isHook = true;
     }
 
     // 가중치(단어 수)
@@ -475,26 +342,26 @@ function retimeScript(script, totalSeconds, language) {
       totalWeight = weights.length;
     }
 
-    // 초기 분배
+    // 분배
     const durations = weights.map(w => (w / totalWeight) * duration);
 
-    // Hook 10~15% 강제
+    // Hook 10~15%
     const minHook = duration * 0.10;
     const maxHook = duration * 0.15;
     durations[0] = Math.min(maxHook, Math.max(minHook, durations[0]));
 
-    // CTA 5~8% 캡
+    // CTA 5~8%
     const ctaIndex = items.findIndex(i => i.isCTA);
     if (ctaIndex >= 0) {
       durations[ctaIndex] = Math.min(duration * 0.08, Math.max(MIN_SLICE, durations[ctaIndex]));
     }
 
-    // 최소 세그먼트 보장
+    // 최소 세그 보장
     for (let i = 0; i < durations.length; i++) {
       if (i !== 0 && i !== ctaIndex) durations[i] = Math.max(MIN_SLICE, durations[i]);
     }
 
-    // 총합 보정(합이 duration을 넘을 수 있음)
+    // 총합 보정
     const frozen = new Set([0]); if (ctaIndex >= 0) frozen.add(ctaIndex);
     const frozenSum = Array.from(frozen).reduce((s, i) => s + durations[i], 0);
     const freeIdx = durations.map((_, i) => i).filter(i => !frozen.has(i));
@@ -505,19 +372,16 @@ function retimeScript(script, totalSeconds, language) {
       freeIdx.forEach(i => durations[i] = Math.max(MIN_SLICE, durations[i] * scale));
     }
 
-    // 누적하면서 타임스탬프 생성(소수 1자리)
+    // 타임스탬프 생성
     const result = [];
     let t = 0;
     for (let i = 0; i < items.length; i++) {
       const start = DEC(t);
       if (i === items.length - 1) {
-        // 마지막 라인은 총 길이에 정확히 맞춤
         result.push(`[${start.toFixed(1)}-${DEC(duration).toFixed(1)}] ${items[i].text}`);
       } else {
         let end = DEC(t + durations[i]);
-        // 마지막 이전 구간이 총 길이를 넘지 않도록 클램프
         if (end > duration - 0.1) end = DEC(duration - 0.1);
-        // 최소 구간 보장
         if (end - start < MIN_SLICE) end = DEC(start + MIN_SLICE);
         result.push(`[${start.toFixed(1)}-${end.toFixed(1)}] ${items[i].text}`);
         t = end;
@@ -531,7 +395,7 @@ function retimeScript(script, totalSeconds, language) {
 }
 
 /* ============================== 비주얼 요소 ============================== */
-function generateSmartVisualElements(script, videoIdea, style, duration) {
+function generateSmartVisualElements(script, videoIdea, style) {
   try {
     const lines = splitLines(script);
     const transitions = [];
@@ -614,32 +478,54 @@ function generateSmartVisualElements(script, videoIdea, style, duration) {
   }
 }
 
-/* ============================== OpenAI 호출 ============================== */
-async function callOpenAI(systemPrompt, userPrompt, config, style) {
+/* ============================== 바이럴 줄바꿈 강화 ============================== */
+/**
+ * 문장 끝(. ! ?) 또는 콜론/대시 뒤에 시각적 템포를 위해 이중 줄바꿈을 삽입.
+ * - 타임스탬프 구간 안의 텍스트만 처리
+ * - [HOOK]/[CTA] 같은 토큰은 유지
+ */
+function applyViralLineBreaksToScript(script) {
+  const lines = splitLines(script);
+  const out = lines.map(line => {
+    const m = line.match(/^\[\s*\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\s*\]\s*/);
+    if (!m) return line; // 타임스탬프 없는 라인은 그대로
+    const prefix = m[0];
+    const text = line.slice(prefix.length);
+
+    // 문장 경계 기준으로 이중 개행 추가
+    const withBreaks = text
+      .replace(/([.!?])\s+(?=\S)/g, "$1\n\n")     // . ! ? 뒤 공백을 이중 개행으로
+      .replace(/([:;—-])\s+(?=\S)/g, "$1\n\n")    // : ; — - 뒤도 개행
+      .replace(/\s{2,}/g, " ")
+      .trim();
+
+    return prefix + withBreaks;
+  });
+  return out.join("\n");
+}
+
+/* ============================== OpenAI 호출 (항상 VIRAL 파라미터) ============================== */
+async function callOpenAI(systemPrompt, userPrompt, config) {
   const { OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL, HARD_TIMEOUT_MS } = config;
-  const temperatures = {
-    meme: 0.8, challenge: 0.6, storytelling: 0.5, quicktip: 0.3, productplug: 0.4, faceless: 0.3
-  };
+
+  // 창의성 최대로, 반복 억제는 약하게
+  const temperature = 0.95;
+  const top_p = 0.98;
+  const max_tokens = 1200;
+  const presence_penalty = 0.2;
+  const frequency_penalty = 0.2;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HARD_TIMEOUT_MS);
-
   const url = `${OPENAI_BASE_URL.replace(/\/+$/,"")}/v1/chat/completions`;
 
   try {
     const response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENAI_API_KEY}`
-      },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_API_KEY}` },
       body: JSON.stringify({
-        model: OPENAI_MODEL, // 기본값 gpt-4o-mini, 변경 금지(환경변수로만)
-        temperature: temperatures[style] ?? 0.4,
-        top_p: 0.95,
-        max_tokens: 800,
-        presence_penalty: 0.3,
-        frequency_penalty: 0.4,
+        model: OPENAI_MODEL, // gpt-4o-mini 유지
+        temperature, top_p, max_tokens, presence_penalty, frequency_penalty,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
@@ -668,7 +554,7 @@ async function callOpenAI(systemPrompt, userPrompt, config, style) {
 }
 
 /* ============================== 입력 검증 ============================== */
-function validateInputs({ text, style, length, tone, language, ctaInclusion, outputType, factGuard }) {
+function validateInputs({ text, style, length, tone, language, ctaInclusion, outputType }) {
   if (!text || typeof text !== "string" || text.trim().length < 3) {
     const e = new Error("`text` is required and must be a string with length ≥ 3");
     e.status = 400; throw e;
@@ -679,17 +565,15 @@ function validateInputs({ text, style, length, tone, language, ctaInclusion, out
 
   const dur = Math.max(MIN_DURATION, Math.min(Number(length) || 45, MAX_DURATION));
   const toneKey = String(tone || "Casual");
-  const langKey = normalizeLanguageKey(language || "English");
+  const langKey = language || "English";
   const cta = !!ctaInclusion;
   const out = String(outputType || "script").toLowerCase();
-  const factMode = (factGuard === "strict" || factGuard === "off") ? factGuard : "light";
 
-  return { styleKey, duration: dur, tone: toneKey, language: language || "English", langKey, cta, output: out, factMode };
+  return { styleKey, duration: dur, tone: toneKey, language: langKey, cta, output: out };
 }
 
 /* ============================== 메인 핸들러 ============================== */
 module.exports = async (req, res) => {
-  // CORS
   if (!setupCORS(req, res)) {
     if (req.method === "OPTIONS") return res.status(204).end();
     return res.status(403).json({ error: "CORS: origin not allowed" });
@@ -712,33 +596,39 @@ module.exports = async (req, res) => {
 
   try {
     const {
-      text, style, length, tone = "Casual", language = "English",
-      ctaInclusion = false, outputType = "script", factGuard = "light"
+      text, style, length, tone = "Casual",
+      language = "English", ctaInclusion = false,
+      outputType = "script"
     } = body;
 
-    const { styleKey, duration, tone: toneKey, language: langInput, langKey, cta, output, factMode } =
-      validateInputs({ text, style, length, tone, language, ctaInclusion, outputType, factGuard });
+    const { styleKey, duration, tone: toneKey, language: langInput, cta, output } =
+      validateInputs({ text, style, length, tone, language, ctaInclusion, outputType });
 
     const wps = getWordsPerSecond(langInput);
     const wordsTarget = Math.round(duration * wps);
 
+    // 프롬프트 생성 (항상 바이럴)
     const systemPrompt = createViralSystemPrompt(styleKey, toneKey, output, langInput, text);
     const userPrompt = createViralUserPrompt({
       text, style: styleKey, tone: toneKey, language: langInput, duration, wordsTarget, ctaInclusion: cta
     });
 
-    // 1차 생성
-    let rawScript = await callOpenAI(systemPrompt, userPrompt, config, styleKey);
+    // 생성
+    const raw = await callOpenAI(systemPrompt, userPrompt, config);
 
-    // 클리셰 필터 → 팩트가드 → 공백 정리
-    rawScript = applyClicheFilter(rawScript, langKey);
-    rawScript = runFactGuard(rawScript, factMode);
+    // 타이밍 리타이밍
+    const retimed = retimeScript(raw, duration);
 
-    // 타이밍 재조정
-    const finalScript = retimeScript(rawScript, duration, langInput);
+    // 비주얼 요소는 줄바꿈 전 스크립트 기반으로 생성 (파싱 안전)
+    let visualElements = null;
+    if (output === "complete") {
+      visualElements = generateSmartVisualElements(retimed, text, styleKey);
+    }
+
+    // 줄바꿈 강화 적용(가독성/리듬감 업)
+    const finalScript = applyViralLineBreaksToScript(retimed);
 
     if (output === "complete") {
-      const visualElements = generateSmartVisualElements(finalScript, text, styleKey, duration);
       return res.status(200).json({
         result: {
           script: finalScript,
@@ -749,12 +639,10 @@ module.exports = async (req, res) => {
       return res.status(200).json({ result: finalScript });
     }
   } catch (error) {
-    // 에러 로깅(민감정보 최소화)
     const msg = String(error?.message || "Internal error");
     if (config.DEBUG_ERRORS) {
       console.error("[API Error]", msg);
     } else {
-      // 최소한의 코드 경로만
       console.error("[API Error]");
     }
     const status = error?.status || 500;
