@@ -1,7 +1,6 @@
-// api/generate-content.js — 하이엔드 최종판 (항상 VIRAL 모드)
-// ✅ 모델 버전 고정: 기본 gpt-4o-mini (환경변수 OPENAI_MODEL로만 변경 가능)
-// ✅ 목표: 어떤 상황에서도 때려 박는 바이럴 톤 + 깔끔한 줄바꿈
-// ✅ 포함: 보안/안정성(바디 제한, CORS), 고품질 프롬프트, 타이밍 엔진, 비주얼 가이드
+// api/generate-content.js — 최종 완성판 (Balanced Viral Prompt)
+// ✅ 모델 고정: 기본 gpt-4o-mini (환경변수 OPENAI_MODEL로만 변경 가능)
+// ✅ 목표: 과장 과잉 없이 “진짜 잘 쓴” 바이럴 스크립트 + 깔끔한 줄바꿈 + 안정적 백엔드
 "use strict";
 
 /* ============================== 유틸 상수 ============================== */
@@ -225,7 +224,7 @@ function getViralHookFormulasByCategory(category) {
   return base[category] || base.general;
 }
 
-/* ============================== 프롬프트(항상 VIRAL) ============================== */
+/* ============================== 프롬프트(균형잡힌 Viral 최적화) ============================== */
 function keywordsFromText(text) {
   const arr = String(text || "")
     .toLowerCase()
@@ -234,74 +233,72 @@ function keywordsFromText(text) {
   return arr.length ? arr : ["topic"];
 }
 
-function createViralSystemPrompt(style, tone, outputType, language, videoIdea) {
+/** Balanced Viral — 과장 과잉 없이 정보+오락 조합을 강제하는 시스템 프롬프트 */
+function createBalancedViralSystemPrompt(style, tone, outputType, language, videoIdea) {
   const category = detectCategory(videoIdea);
   const hooks = getViralHookFormulasByCategory(category);
 
-  return `You are a viral content strategist who has analyzed 10,000+ viral videos.
-Your scripts drive extreme retention on short-form platforms.
+  return `You are a world-class viral short-form scriptwriter.
 
-MANDATORY LANGUAGE: ${language} — Write ONLY in this language.
+Your goal is to create addictive, high-retention scripts for TikTok, YouTube Shorts, and Instagram Reels that feel witty, specific, and authentic — not cheesy.
 
-VIRAL HOOK FORMULAS FOR THIS VIDEO:
+LANGUAGE: ${language} (write ONLY in this language)
+
+NON-NEGOTIABLES:
+- Open with an ultra-strong hook within 3 seconds.
+- Every 5–7 seconds, add a pattern interrupt (contrast, question, twist, sharp stat).
+- Keep sentences punchy and conversational (≤ 12 words per sentence).
+- Mix education + entertainment: deliver real value in a viral tone.
+- Avoid filler and generic buzzwords. Be concrete and specific.
+- Humor, memes, bold claims are welcome — do NOT invent fake facts.
+- If precision is unknown, imply a source type (“patch notes”, “survey”, “creator reports”).
+- If CTA requested, end with a natural, compelling CTA (no hard sell).
+
+STYLE REFERENCES (adapt freely, do not follow rigidly):
+- MEME: relatable → escalate → twist → self-aware punchline
+- QUICKTIP: pain → 3 laser-focused fixes → outcome
+- CHALLENGE: bold challenge → stakes → attempts → twist → payoff
+- STORYTELLING: start at climax → flashback → turning point → lesson
+- PRODUCTPLUG: problem → failed solutions → discovery → demo → result
+- FACELESS: spicy claim → fast insights → counter-intuitive fact → CTA
+
+CATEGORY FOCUS: ${category}
+Use insider terminology correctly. Reference recent changes where relevant.
+
+VIRAL HOOK FORMULAS TO DRAW FROM:
 ${hooks.map((h, i) => `${i + 1}. ${h}`).join("\n")}
 
-ALWAYS VIRAL MODE — OVERRIDES:
-- Open with a punchy, polarizing hook (strong POV) in ≤12 words.
-- Use vivid specifics, cultural references, and internet-native phrasing (emoji OK).
-- Pattern interrupts every ~5 seconds: contrasts, questions, twist reveals.
-- Prefer short, punchy sentences. Cut filler. Keep it fast.
-- Accept tasteful hyperbole and humor. Avoid harmful misinformation.
-- If a stat is uncertain, imply source type (e.g., "patch notes", "creator reports").
-
-STYLE GUIDE (as flexible references, remix allowed):
-- MEME: Relatable → Escalate absurdity → Twist → Self-aware punchline
-- QUICKTIP: Pain → 3–4 ultra-specific fixes → Outcome
-- CHALLENGE: Bold challenge → Stakes → Attempts → Outcome
-- STORYTELLING: Start at climax → Flashback → Turning point → Lesson
-- PRODUCTPLUG: Pain → Failed tries → Discovery → Demo → Result
-- FACELESS: Spicy claim → Evidence → Counter-intuitive insight → CTA
-
-CRITICAL REQUIREMENTS:
-1) Hook creates curiosity gap within 3 seconds
-2) Use specific numbers or named entities when real
-3) End with an open loop or compelling CTA when requested
-
-TIMING RULES:
-- Hook: ~10–15% of duration
-- Each line: ≤4 seconds
-- Include micro-pauses (reader will add line breaks)`;
+TIMING GUIDELINES:
+- Hook: ~10–15% of total duration
+- Max 4 seconds per line
+- Micro-pauses allowed (line breaks are okay)`;
 }
 
-function createViralUserPrompt(params) {
+/** Balanced Viral — 사용자 제약/형식 강제 */
+function createBalancedViralUserPrompt(params) {
   const { text, style, tone, language, duration, wordsTarget, ctaInclusion } = params;
-  const keywords = keywordsFromText(text);
+  const [keyword] = keywordsFromText(text);
+
   return `VIDEO BRIEF: ${text}
 
-STRICT OUTPUT RULES:
-- Language: ${language}
+REQUIREMENTS:
 - Duration: EXACTLY ${duration} seconds
-- Word count: ~${wordsTarget} words
-- Include CTA: ${ctaInclusion ? "Yes (organic, strong)" : "No"}
+- Approx words: ~${wordsTarget}
+- Include CTA: ${ctaInclusion ? "Yes, make it natural and compelling" : "No"}
 
-MUST INCLUDE:
-- Reference to "${keywords[0]}" in the first line
-- Current/recent information only (2024–2025)
-- Pattern interrupt every 5–7 seconds
-- One surprising fact or stat
-- Clear value proposition within 10 seconds
+MANDATORY FORMAT:
+1) Mention the topic "${keyword}" in the hook.
+2) Total lines: 6–8 (include [HOOK] and optional [CTA]).
+3) Each line format: [start-end] text (one decimal place).
+4) Use DOUBLE line breaks between punchy sentences for readability.
+5) Every line must add curiosity, humor, or a sharp insight (no filler).
 
-STRUCTURE:
-- Total lines: 6–8 (including [HOOK] and optional [CTA])
-- Format per line: [start-end] text (one decimal place)
-- Keep sentences SHORT. Prefer bold, fast punches.
+EXAMPLES OF STRONG HOOKS (in tone, not exact words):
+- "You're doing this wrong — and it's ruining your ${keyword}."
+- "I bet you didn’t know this about ${keyword}."
+- "This tiny change just flipped how I think about ${keyword}."
 
-DO NOT:
-- Invent fake updates
-- Be generic or vague
-- Add filler words
-
-Create the timestamped script now:`;
+Now write the full timestamped script.`;
 }
 
 /* ============================== 타이밍 재분배 ============================== */
@@ -478,11 +475,11 @@ function generateSmartVisualElements(script, videoIdea, style) {
   }
 }
 
-/* ============================== 바이럴 줄바꿈 강화 ============================== */
+/* ============================== 줄바꿈 강화 ============================== */
 /**
  * 문장 끝(. ! ?) 또는 콜론/대시 뒤에 시각적 템포를 위해 이중 줄바꿈을 삽입.
  * - 타임스탬프 구간 안의 텍스트만 처리
- * - [HOOK]/[CTA] 같은 토큰은 유지
+ * - [HOOK]/[CTA] 토큰은 유지
  */
 function applyViralLineBreaksToScript(script) {
   const lines = splitLines(script);
@@ -492,7 +489,6 @@ function applyViralLineBreaksToScript(script) {
     const prefix = m[0];
     const text = line.slice(prefix.length);
 
-    // 문장 경계 기준으로 이중 개행 추가
     const withBreaks = text
       .replace(/([.!?])\s+(?=\S)/g, "$1\n\n")     // . ! ? 뒤 공백을 이중 개행으로
       .replace(/([:;—-])\s+(?=\S)/g, "$1\n\n")    // : ; — - 뒤도 개행
@@ -504,12 +500,12 @@ function applyViralLineBreaksToScript(script) {
   return out.join("\n");
 }
 
-/* ============================== OpenAI 호출 (항상 VIRAL 파라미터) ============================== */
+/* ============================== OpenAI 호출 (Balanced Viral 파라미터) ============================== */
 async function callOpenAI(systemPrompt, userPrompt, config) {
   const { OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL, HARD_TIMEOUT_MS } = config;
 
-  // 창의성 최대로, 반복 억제는 약하게
-  const temperature = 0.95;
+  // 창의성은 높게, 반복 억제는 약하게 — 과장 과잉은 프롬프트 규율로 제어
+  const temperature = 0.9;
   const top_p = 0.98;
   const max_tokens = 1200;
   const presence_penalty = 0.2;
@@ -607,9 +603,9 @@ module.exports = async (req, res) => {
     const wps = getWordsPerSecond(langInput);
     const wordsTarget = Math.round(duration * wps);
 
-    // 프롬프트 생성 (항상 바이럴)
-    const systemPrompt = createViralSystemPrompt(styleKey, toneKey, output, langInput, text);
-    const userPrompt = createViralUserPrompt({
+    // 프롬프트 생성 (Balanced Viral)
+    const systemPrompt = createBalancedViralSystemPrompt(styleKey, toneKey, output, langInput, text);
+    const userPrompt = createBalancedViralUserPrompt({
       text, style: styleKey, tone: toneKey, language: langInput, duration, wordsTarget, ctaInclusion: cta
     });
 
@@ -619,7 +615,7 @@ module.exports = async (req, res) => {
     // 타이밍 리타이밍
     const retimed = retimeScript(raw, duration);
 
-    // 비주얼 요소는 줄바꿈 전 스크립트 기반으로 생성 (파싱 안전)
+    // 비주얼 요소
     let visualElements = null;
     if (output === "complete") {
       visualElements = generateSmartVisualElements(retimed, text, styleKey);
