@@ -1,15 +1,17 @@
-// api/generate-content.js — 최종 완성판 (Balanced Viral Prompt)
-// ✅ 모델 고정: 기본 gpt-4o-mini (환경변수 OPENAI_MODEL로만 변경 가능)
-// ✅ 목표: 과장 과잉 없이 “진짜 잘 쓴” 바이럴 스크립트 + 깔끔한 줄바꿈 + 안정적 백엔드
+// api/generate-content.js — Quality Assurance 버전
+// ✅ 자동 품질 검증: 80점 미달시 최대 3회 재시도
+// ✅ 3회 실패시 최고점 스크립트 반환
 "use strict";
 
 /* ============================== 유틸 상수 ============================== */
-const DEFAULT_MODEL = "gpt-4o-mini"; // (변경 금지, 환경변수로만 오버라이드)
-const MAX_BODY_BYTES = Math.max(256_000, Math.min(Number(process.env.MAX_BODY_BYTES) || 1_000_000, 5_000_000)); // 256KB~5MB
+const DEFAULT_MODEL = "gpt-4o-mini";
+const MAX_BODY_BYTES = Math.max(256_000, Math.min(Number(process.env.MAX_BODY_BYTES) || 1_000_000, 5_000_000));
 const MIN_DURATION = 15;
 const MAX_DURATION = 180;
-const MIN_SLICE = 0.4; // 각 세그 최소 길이(초)
+const MIN_SLICE = 0.4;
 const DEC = (n) => Math.round(n * 10) / 10;
+const QUALITY_THRESHOLD = 80; // 품질 통과 기준
+const MAX_QUALITY_ATTEMPTS = 3; // 최대 재시도 횟수
 
 /* ============================== CORS 설정 ============================== */
 function setupCORS(req, res) {
@@ -67,10 +69,11 @@ function setupCORS(req, res) {
 function getConfig() {
   return {
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-    OPENAI_MODEL: process.env.OPENAI_MODEL || DEFAULT_MODEL, // gpt-4o-mini 유지
+    OPENAI_MODEL: process.env.OPENAI_MODEL || DEFAULT_MODEL,
     OPENAI_BASE_URL: process.env.OPENAI_BASE_URL || "https://api.openai.com",
     HARD_TIMEOUT_MS: Math.max(15000, Math.min(Number(process.env.HARD_TIMEOUT_MS) || 30000, 120000)),
-    DEBUG_ERRORS: process.env.DEBUG_ERRORS === "1" || process.env.DEBUG_ERRORS === "true"
+    DEBUG_ERRORS: process.env.DEBUG_ERRORS === "1" || process.env.DEBUG_ERRORS === "true",
+    ENABLE_QUALITY_CHECK: process.env.ENABLE_QUALITY_CHECK !== "false" // 기본값 true
   };
 }
 
@@ -103,7 +106,7 @@ async function parseRequestBody(req) {
 /* ============================== 언어/속도 ============================== */
 function normalizeLanguageKey(language) {
   const L0 = String(language || "").trim().toLowerCase();
-  const L = L0.replace(/[_-]([a-z]{2})$/i, ""); // ko-KR -> ko
+  const L = L0.replace(/[_-]([a-z]{2})$/i, "");
   if (L.includes("korean") || L.includes("한국") || L === "ko") return "ko";
   if (L.includes("english") || L === "en") return "en";
   if (L.includes("spanish") || L === "es") return "es";
@@ -135,7 +138,7 @@ function normalizeNewlines(text) {
   const LF = "\n";
   for (let i = 0; i < str.length; i++) {
     const code = str.charCodeAt(i);
-    if (code === 13) { // CR
+    if (code === 13) {
       if (str.charCodeAt(i + 1) === 10) i++;
       out += LF;
     } else {
@@ -170,6 +173,124 @@ function stripTimePrefix(line) {
     if (closeBracket > 1) return text.slice(closeBracket + 1).trim();
   }
   return text;
+}
+
+/* ============================== 품질 평가 시스템 ============================== */
+function evaluateScriptQuality(script, params) {
+  try {
+    const { duration, language, ctaInclusion } = params;
+    const lines = splitLines(script);
+    
+    if (!lines.length) return { total: 0, breakdown: {} };
+    
+    // 1. Hook 강도 평가 (30점)
+    const firstLine = stripTimePrefix(lines[0] || "").toLowerCase();
+    const hookPowerWords = [
+      "never", "always", "stop", "secret", "nobody", "everyone", 
+      "wrong", "mistake", "truth", "actually", "really", "crazy",
+      "unbelievable", "shocking", "insane", "viral", "breaking"
+    ];
+    const hookWordCount = hookPowerWords.filter(w => firstLine.includes(w)).length;
+    const hasQuestion = firstLine.includes("?");
+    const hookScore = Math.min(30, 
+      (hookWordCount * 8) + 
+      (hasQuestion ? 10 : 0) + 
+      (firstLine.includes("[hook]") ? 5 : 0)
+    );
+    
+    // 2. 타이밍 정확도 (20점)
+    const expectedWords = Math.round(duration * getWordsPerSecond(language));
+    const actualWords = script.replace(/\[[\d.-]+\]/g, "").split(/\s+/).filter(Boolean).length;
+    const timingDiff = Math.abs(actualWords - expectedWords) / expectedWords;
+    const timingScore = Math.max(0, Math.round((1 - timingDiff) * 20));
+    
+    // 3. 구조 완성도 (25점)
+    let structureScore = 0;
+    
+    // Hook 존재 여부
+    if (/\[HOOK\]/i.test(script)) structureScore += 10;
+    
+    // 적절한 라인 수 (5-10개)
+    if (lines.length >= 5 && lines.length <= 10) {
+      structureScore += 10;
+    } else if (lines.length >= 4 && lines.length <= 12) {
+      structureScore += 5;
+    }
+    
+    // CTA 체크
+    if (ctaInclusion) {
+      if (/\[CTA\]/i.test(script)) structureScore += 5;
+    } else {
+      structureScore += 5; // CTA 불필요시 자동 5점
+    }
+    
+    // 타임스탬프 일관성
+    const hasTimestamps = lines.every(line => /^\[\d+(?:\.\d+)?-\d+(?:\.\d+)?\]/.test(line));
+    if (hasTimestamps) structureScore += 5;
+    
+    // 4. 참여도 요소 (25점)
+    let engagementScore = 0;
+    
+    // 질문 개수
+    const questions = (script.match(/\?/g) || []).length;
+    engagementScore += Math.min(10, questions * 3);
+    
+    // 직접 호칭 (you, your)
+    const directAddress = (script.toLowerCase().match(/\b(you|your)\b/g) || []).length;
+    engagementScore += Math.min(8, directAddress * 2);
+    
+    // 행동 유도 동사
+    const actionWords = ["try", "stop", "start", "watch", "think", "imagine", "check", "follow"];
+    const actionCount = actionWords.filter(w => 
+      new RegExp(`\\b${w}\\b`, 'i').test(script)
+    ).length;
+    engagementScore += Math.min(7, actionCount * 3);
+    
+    const total = hookScore + timingScore + structureScore + engagementScore;
+    
+    return {
+      total: Math.min(100, total),
+      breakdown: {
+        hook: hookScore,
+        timing: timingScore,
+        structure: structureScore,
+        engagement: engagementScore
+      }
+    };
+  } catch (error) {
+    console.error("Quality evaluation error:", error);
+    return { total: 0, breakdown: {} };
+  }
+}
+
+/* ============================== 개선 힌트 생성 ============================== */
+function generateImprovementHints(evaluation) {
+  const hints = [];
+  const { breakdown } = evaluation;
+  
+  if (breakdown.hook < 20) {
+    hints.push("- Start with a MUCH stronger hook using power words like 'never', 'stop', 'secret'");
+    hints.push("- Consider opening with a provocative question");
+  }
+  
+  if (breakdown.timing < 15) {
+    hints.push("- Adjust the script length to match the target duration more precisely");
+    hints.push("- Add or remove content to hit the word count target");
+  }
+  
+  if (breakdown.structure < 20) {
+    hints.push("- Make sure to include a clear [HOOK] marker");
+    hints.push("- Keep the script between 5-10 lines for optimal structure");
+    hints.push("- Ensure all lines have proper timestamps");
+  }
+  
+  if (breakdown.engagement < 15) {
+    hints.push("- Add more questions to engage the viewer (aim for 2-3)");
+    hints.push("- Use 'you' and 'your' more frequently to address the viewer directly");
+    hints.push("- Include action words like 'try', 'stop', 'imagine'");
+  }
+  
+  return hints;
 }
 
 /* ============================== 카테고리/후크 데이터 ============================== */
@@ -224,7 +345,7 @@ function getViralHookFormulasByCategory(category) {
   return base[category] || base.general;
 }
 
-/* ============================== 프롬프트(균형잡힌 Viral 최적화) ============================== */
+/* ============================== 프롬프트 ============================== */
 function keywordsFromText(text) {
   const arr = String(text || "")
     .toLowerCase()
@@ -233,7 +354,6 @@ function keywordsFromText(text) {
   return arr.length ? arr : ["topic"];
 }
 
-/** Balanced Viral — 과장 과잉 없이 정보+오락 조합을 강제하는 시스템 프롬프트 */
 function createBalancedViralSystemPrompt(style, tone, outputType, language, videoIdea) {
   const category = detectCategory(videoIdea);
   const hooks = getViralHookFormulasByCategory(category);
@@ -251,7 +371,7 @@ NON-NEGOTIABLES:
 - Mix education + entertainment: deliver real value in a viral tone.
 - Avoid filler and generic buzzwords. Be concrete and specific.
 - Humor, memes, bold claims are welcome — do NOT invent fake facts.
-- If precision is unknown, imply a source type (“patch notes”, “survey”, “creator reports”).
+- If precision is unknown, imply a source type ("patch notes", "survey", "creator reports").
 - If CTA requested, end with a natural, compelling CTA (no hard sell).
 
 STYLE REFERENCES (adapt freely, do not follow rigidly):
@@ -274,12 +394,11 @@ TIMING GUIDELINES:
 - Micro-pauses allowed (line breaks are okay)`;
 }
 
-/** Balanced Viral — 사용자 제약/형식 강제 */
-function createBalancedViralUserPrompt(params) {
+function createBalancedViralUserPrompt(params, improvementHints = []) {
   const { text, style, tone, language, duration, wordsTarget, ctaInclusion } = params;
   const [keyword] = keywordsFromText(text);
-
-  return `VIDEO BRIEF: ${text}
+  
+  let prompt = `VIDEO BRIEF: ${text}
 
 REQUIREMENTS:
 - Duration: EXACTLY ${duration} seconds
@@ -295,10 +414,17 @@ MANDATORY FORMAT:
 
 EXAMPLES OF STRONG HOOKS (in tone, not exact words):
 - "You're doing this wrong — and it's ruining your ${keyword}."
-- "I bet you didn’t know this about ${keyword}."
-- "This tiny change just flipped how I think about ${keyword}."
+- "I bet you didn't know this about ${keyword}."
+- "This tiny change just flipped how I think about ${keyword}."`;
 
-Now write the full timestamped script.`;
+  // 개선 힌트 추가
+  if (improvementHints.length > 0) {
+    prompt += `\n\nQUALITY IMPROVEMENTS REQUIRED:\n${improvementHints.join("\n")}`;
+  }
+
+  prompt += "\n\nNow write the full timestamped script.";
+  
+  return prompt;
 }
 
 /* ============================== 타이밍 재분배 ============================== */
@@ -321,12 +447,10 @@ function retimeScript(script, totalSeconds) {
       };
     });
 
-    // 첫 줄은 반드시 [HOOK]
     if (!items[0].isHook && items[0].text) {
       items[0].text = "[HOOK] " + items[0].text;
     }
 
-    // 가중치(단어 수)
     const weights = items.map(item => {
       const t = item.text.replace(/\[HOOK\]|\[CTA\]/gi, "").trim();
       const words = t.split(/\s+/).filter(Boolean).length;
@@ -339,26 +463,21 @@ function retimeScript(script, totalSeconds) {
       totalWeight = weights.length;
     }
 
-    // 분배
     const durations = weights.map(w => (w / totalWeight) * duration);
 
-    // Hook 10~15%
     const minHook = duration * 0.10;
     const maxHook = duration * 0.15;
     durations[0] = Math.min(maxHook, Math.max(minHook, durations[0]));
 
-    // CTA 5~8%
     const ctaIndex = items.findIndex(i => i.isCTA);
     if (ctaIndex >= 0) {
       durations[ctaIndex] = Math.min(duration * 0.08, Math.max(MIN_SLICE, durations[ctaIndex]));
     }
 
-    // 최소 세그 보장
     for (let i = 0; i < durations.length; i++) {
       if (i !== 0 && i !== ctaIndex) durations[i] = Math.max(MIN_SLICE, durations[i]);
     }
 
-    // 총합 보정
     const frozen = new Set([0]); if (ctaIndex >= 0) frozen.add(ctaIndex);
     const frozenSum = Array.from(frozen).reduce((s, i) => s + durations[i], 0);
     const freeIdx = durations.map((_, i) => i).filter(i => !frozen.has(i));
@@ -369,7 +488,6 @@ function retimeScript(script, totalSeconds) {
       freeIdx.forEach(i => durations[i] = Math.max(MIN_SLICE, durations[i] * scale));
     }
 
-    // 타임스탬프 생성
     const result = [];
     let t = 0;
     for (let i = 0; i < items.length; i++) {
@@ -476,22 +594,17 @@ function generateSmartVisualElements(script, videoIdea, style) {
 }
 
 /* ============================== 줄바꿈 강화 ============================== */
-/**
- * 문장 끝(. ! ?) 또는 콜론/대시 뒤에 시각적 템포를 위해 이중 줄바꿈을 삽입.
- * - 타임스탬프 구간 안의 텍스트만 처리
- * - [HOOK]/[CTA] 토큰은 유지
- */
 function applyViralLineBreaksToScript(script) {
   const lines = splitLines(script);
   const out = lines.map(line => {
     const m = line.match(/^\[\s*\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\s*\]\s*/);
-    if (!m) return line; // 타임스탬프 없는 라인은 그대로
+    if (!m) return line;
     const prefix = m[0];
     const text = line.slice(prefix.length);
 
     const withBreaks = text
-      .replace(/([.!?])\s+(?=\S)/g, "$1\n\n")     // . ! ? 뒤 공백을 이중 개행으로
-      .replace(/([:;—-])\s+(?=\S)/g, "$1\n\n")    // : ; — - 뒤도 개행
+      .replace(/([.!?])\s+(?=\S)/g, "$1\n\n")
+      .replace(/([:;—-])\s+(?=\S)/g, "$1\n\n")
       .replace(/\s{2,}/g, " ")
       .trim();
 
@@ -500,11 +613,10 @@ function applyViralLineBreaksToScript(script) {
   return out.join("\n");
 }
 
-/* ============================== OpenAI 호출 (Balanced Viral 파라미터) ============================== */
+/* ============================== OpenAI 호출 ============================== */
 async function callOpenAI(systemPrompt, userPrompt, config) {
   const { OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL, HARD_TIMEOUT_MS } = config;
 
-  // 창의성은 높게, 반복 억제는 약하게 — 과장 과잉은 프롬프트 규율로 제어
   const temperature = 0.9;
   const top_p = 0.98;
   const max_tokens = 1200;
@@ -520,7 +632,7 @@ async function callOpenAI(systemPrompt, userPrompt, config) {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_API_KEY}` },
       body: JSON.stringify({
-        model: OPENAI_MODEL, // gpt-4o-mini 유지
+        model: OPENAI_MODEL,
         temperature, top_p, max_tokens, presence_penalty, frequency_penalty,
         messages: [
           { role: "system", content: systemPrompt },
@@ -547,6 +659,81 @@ async function callOpenAI(systemPrompt, userPrompt, config) {
     if (error.name === "AbortError") throw new Error("Request timeout");
     throw error;
   }
+}
+
+/* ============================== 품질 보증 생성 ============================== */
+async function generateWithQualityAssurance(params, config) {
+  const { text, styleKey, tone, language, duration, wordsTarget, ctaInclusion, enableQA } = params;
+  
+  // QA 비활성화시 바로 생성
+  if (!enableQA) {
+    const systemPrompt = createBalancedViralSystemPrompt(styleKey, tone, "script", language, text);
+    const userPrompt = createBalancedViralUserPrompt(params);
+    const raw = await callOpenAI(systemPrompt, userPrompt, config);
+    const retimed = retimeScript(raw, duration);
+    return {
+      script: retimed,
+      qualityScore: null,
+      attempts: 1
+    };
+  }
+  
+  let bestScript = null;
+  let bestScore = 0;
+  let bestEvaluation = null;
+  let improvementHints = [];
+  
+  const systemPrompt = createBalancedViralSystemPrompt(styleKey, tone, "script", language, text);
+  
+  for (let attempt = 1; attempt <= MAX_QUALITY_ATTEMPTS; attempt++) {
+    console.log(`Quality attempt ${attempt}/${MAX_QUALITY_ATTEMPTS}`);
+    
+    // 프롬프트 생성 (개선 힌트 포함)
+    const userPrompt = createBalancedViralUserPrompt(params, improvementHints);
+    
+    // OpenAI 호출
+    const raw = await callOpenAI(systemPrompt, userPrompt, config);
+    const retimed = retimeScript(raw, duration);
+    
+    // 품질 평가
+    const evaluation = evaluateScriptQuality(retimed, params);
+    console.log(`Attempt ${attempt} score: ${evaluation.total}`);
+    
+    // 최고 점수 업데이트
+    if (evaluation.total > bestScore) {
+      bestScore = evaluation.total;
+      bestScript = retimed;
+      bestEvaluation = evaluation;
+    }
+    
+    // 80점 이상이면 성공
+    if (evaluation.total >= QUALITY_THRESHOLD) {
+      console.log(`Quality threshold met! Score: ${evaluation.total}`);
+      return {
+        script: retimed,
+        qualityScore: evaluation.total,
+        breakdown: evaluation.breakdown,
+        attempts: attempt,
+        status: "PASSED"
+      };
+    }
+    
+    // 마지막 시도가 아니면 개선 힌트 생성
+    if (attempt < MAX_QUALITY_ATTEMPTS) {
+      improvementHints = generateImprovementHints(evaluation);
+      console.log(`Improvement hints for next attempt:`, improvementHints);
+    }
+  }
+  
+  // 3회 시도 후 최고점 스크립트 반환
+  console.log(`Max attempts reached. Best score: ${bestScore}`);
+  return {
+    script: bestScript,
+    qualityScore: bestScore,
+    breakdown: bestEvaluation?.breakdown,
+    attempts: MAX_QUALITY_ATTEMPTS,
+    status: bestScore >= 70 ? "ACCEPTABLE" : "BELOW_TARGET"
+  };
 }
 
 /* ============================== 입력 검증 ============================== */
@@ -594,7 +781,9 @@ module.exports = async (req, res) => {
     const {
       text, style, length, tone = "Casual",
       language = "English", ctaInclusion = false,
-      outputType = "script"
+      outputType = "script",
+      enableQualityCheck = true, // 기본값: QA 활성화
+      includeQualityScore = false // 점수 포함 여부
     } = body;
 
     const { styleKey, duration, tone: toneKey, language: langInput, cta, output } =
@@ -603,37 +792,46 @@ module.exports = async (req, res) => {
     const wps = getWordsPerSecond(langInput);
     const wordsTarget = Math.round(duration * wps);
 
-    // 프롬프트 생성 (Balanced Viral)
-    const systemPrompt = createBalancedViralSystemPrompt(styleKey, toneKey, output, langInput, text);
-    const userPrompt = createBalancedViralUserPrompt({
-      text, style: styleKey, tone: toneKey, language: langInput, duration, wordsTarget, ctaInclusion: cta
-    });
+    // QA 모드로 생성
+    const result = await generateWithQualityAssurance({
+      text,
+      styleKey,
+      tone: toneKey,
+      language: langInput,
+      duration,
+      wordsTarget,
+      ctaInclusion: cta,
+      enableQA: config.ENABLE_QUALITY_CHECK && enableQualityCheck
+    }, config);
 
-    // 생성
-    const raw = await callOpenAI(systemPrompt, userPrompt, config);
-
-    // 타이밍 리타이밍
-    const retimed = retimeScript(raw, duration);
-
-    // 비주얼 요소
+    // 비주얼 요소 생성 (complete 모드시)
     let visualElements = null;
     if (output === "complete") {
-      visualElements = generateSmartVisualElements(retimed, text, styleKey);
+      visualElements = generateSmartVisualElements(result.script, text, styleKey);
     }
 
-    // 줄바꿈 강화 적용(가독성/리듬감 업)
-    const finalScript = applyViralLineBreaksToScript(retimed);
+    // 줄바꿈 강화 적용
+    const finalScript = applyViralLineBreaksToScript(result.script);
 
-    if (output === "complete") {
-      return res.status(200).json({
-        result: {
-          script: finalScript,
-          ...visualElements
-        }
-      });
-    } else {
-      return res.status(200).json({ result: finalScript });
+    // 응답 생성
+    const response = {
+      result: output === "complete" 
+        ? { script: finalScript, ...visualElements }
+        : finalScript
+    };
+
+    // 품질 점수 포함 옵션
+    if (includeQualityScore && result.qualityScore !== null) {
+      response.quality = {
+        score: result.qualityScore,
+        breakdown: result.breakdown,
+        attempts: result.attempts,
+        status: result.status
+      };
     }
+
+    return res.status(200).json(response);
+
   } catch (error) {
     const msg = String(error?.message || "Internal error");
     if (config.DEBUG_ERRORS) {
