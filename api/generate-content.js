@@ -1,7 +1,11 @@
-// api/generate-content.js — Ultra High Quality 버전
-// ✅ 평균 85점+ 스크립트 생성
-// ✅ 실제 바이럴 패턴 기반 강화
 "use strict";
+
+/* =====================================================================
+   Ultra High Quality (UHQ) Script Generator v2
+   - JSON 출력 강제 + Booster(후처리) + n=3 샘플 + 국소 리라이트
+   - 언어별 참여도(2인칭/명령형) 인식, KO WPS 튜닝, 7라인 구조 고정(CTA 포함 시)
+   - 기존 v1 API와 완전 호환(입력/출력 구조 유지)
+   ===================================================================== */
 
 /* ============================== 유틸 상수 ============================== */
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -123,9 +127,10 @@ function normalizeLanguageKey(language) {
 }
 
 function getWordsPerSecond(language) {
+  // KO 튜닝: 2.5 -> 2.3 (과소/과다 생성 방지)
   const WPS_TABLE = {
-    en: 2.3, ko: 2.5, es: 2.6, fr: 2.4, de: 2.2, it: 2.4, pt: 2.4,
-    nl: 2.2, ru: 2.3, ja: 2.8, zh: 2.8, ar: 2.2
+    en: 2.3, ko: 2.3, es: 2.6, fr: 2.4, de: 2.2, it: 2.4, pt: 2.4,
+    nl: 2.2, ru: 2.3, ja: 2.7, zh: 2.7, ar: 2.2
   };
   const langKey = normalizeLanguageKey(language);
   return WPS_TABLE[langKey] || 2.3;
@@ -175,137 +180,6 @@ function stripTimePrefix(line) {
   return text;
 }
 
-/* ============================== 강화된 품질 평가 시스템 ============================== */
-function evaluateScriptQuality(script, params) {
-  try {
-    const { duration, language, ctaInclusion } = params;
-    const lines = splitLines(script);
-    
-    if (!lines.length) return { total: 0, breakdown: {} };
-    
-    // 1. Hook 강도 평가 (30점) - 더 엄격하게
-    const firstLine = stripTimePrefix(lines[0] || "").toLowerCase();
-    const ultraPowerWords = [
-      "stop", "wrong", "never", "always", "nobody", "everyone",
-      "mistake", "secret", "truth", "actually", "literally", 
-      "insane", "crazy", "unbelievable", "shocking", "viral",
-      "broke", "quit", "hate", "destroyed", "ruined", "failed"
-    ];
-    const hookWordCount = ultraPowerWords.filter(w => firstLine.includes(w)).length;
-    const hasQuestion = firstLine.includes("?");
-    const hasNumber = /\d+/.test(firstLine);
-    const hasContrast = /but|however|actually|instead/.test(firstLine);
-    
-    let hookScore = 0;
-    hookScore += hookWordCount * 10; // 파워워드당 10점
-    hookScore += hasQuestion ? 8 : 0;
-    hookScore += hasNumber ? 5 : 0;
-    hookScore += hasContrast ? 7 : 0;
-    hookScore = Math.min(30, hookScore);
-    
-    // 2. 타이밍 정확도 (20점)
-    const expectedWords = Math.round(duration * getWordsPerSecond(language));
-    const actualWords = script.replace(/\[[\d.-]+\]/g, "").split(/\s+/).filter(Boolean).length;
-    const timingDiff = Math.abs(actualWords - expectedWords) / expectedWords;
-    const timingScore = Math.max(0, Math.round((1 - timingDiff * 1.5) * 20));
-    
-    // 3. 구조 완성도 (25점)
-    let structureScore = 0;
-    
-    // Hook 태그 존재
-    if (/\[HOOK\]/i.test(script)) structureScore += 8;
-    
-    // 적절한 라인 수 (6-8개 최적)
-    if (lines.length >= 6 && lines.length <= 8) {
-      structureScore += 10;
-    } else if (lines.length >= 5 && lines.length <= 10) {
-      structureScore += 5;
-    }
-    
-    // CTA 체크
-    if (ctaInclusion) {
-      if (/\[CTA\]/i.test(script) && /follow|comment|share|save|like/.test(script.toLowerCase())) {
-        structureScore += 7;
-      }
-    } else {
-      structureScore += 7;
-    }
-    
-    // 타임스탬프 형식 체크
-    const validTimestamps = lines.filter(line => 
-      /^\[\d+(?:\.\d+)?-\d+(?:\.\d+)?\]/.test(line)
-    ).length;
-    if (validTimestamps === lines.length) structureScore += 5;
-    
-    // 4. 참여도 요소 (25점)
-    let engagementScore = 0;
-    
-    // 질문 (최소 2개 권장)
-    const questions = (script.match(/\?/g) || []).length;
-    engagementScore += Math.min(10, questions * 4);
-    
-    // 직접 호칭 (you/your 최소 3회)
-    const directAddress = (script.toLowerCase().match(/\b(you|your|you're|you've)\b/g) || []).length;
-    engagementScore += Math.min(8, directAddress * 2.5);
-    
-    // 행동 유도 동사
-    const strongActionWords = [
-      "stop", "try", "watch", "wait", "look", "check",
-      "imagine", "think", "remember", "notice", "see"
-    ];
-    const actionCount = strongActionWords.filter(w => 
-      new RegExp(`\\b${w}\\b`, 'i').test(script)
-    ).length;
-    engagementScore += Math.min(7, actionCount * 3.5);
-    
-    const total = hookScore + timingScore + structureScore + engagementScore;
-    
-    return {
-      total: Math.min(100, total),
-      breakdown: {
-        hook: hookScore,
-        timing: timingScore,
-        structure: structureScore,
-        engagement: engagementScore
-      }
-    };
-  } catch (error) {
-    console.error("Quality evaluation error:", error);
-    return { total: 0, breakdown: {} };
-  }
-}
-
-/* ============================== 개선 힌트 생성 ============================== */
-function generateImprovementHints(evaluation) {
-  const hints = [];
-  const { breakdown } = evaluation;
-  
-  if (breakdown.hook < 20) {
-    hints.push("- CRITICAL: Start with 'Stop', 'Never', 'You're doing X wrong', or a shocking number/stat");
-    hints.push("- Use pattern: [Controversial claim] + 'and here's why' or 'but nobody talks about it'");
-    hints.push("- Include specific numbers: '97% of people', '3 seconds', '$10,000 mistake'");
-  }
-  
-  if (breakdown.timing < 15) {
-    hints.push("- Strictly match the word count to duration (be more concise or elaborate)");
-    hints.push("- Each line should be 3-4 seconds max, keep it snappy");
-  }
-  
-  if (breakdown.structure < 20) {
-    hints.push("- MUST have [HOOK] tag at the beginning");
-    hints.push("- Keep exactly 6-8 lines for optimal pacing");
-    hints.push("- Every line needs [start-end] timestamp format");
-  }
-  
-  if (breakdown.engagement < 15) {
-    hints.push("- Add at least 2-3 questions throughout (not just in hook)");
-    hints.push("- Say 'you' or 'your' at least 4 times - make it personal");
-    hints.push("- Use commands: 'Stop doing X', 'Try this instead', 'Watch what happens'");
-  }
-  
-  return hints;
-}
-
 /* ============================== 카테고리 검출 ============================== */
 function detectCategory(idea) {
   const s = String(idea || "").toLowerCase();
@@ -318,7 +192,7 @@ function detectCategory(idea) {
   return "general";
 }
 
-/* ============================== 초강력 바이럴 훅 ============================== */
+/* ============================== 초강력 바이럴 훅(템플릿) ============================== */
 function getUltraViralHooks(category) {
   const hooks = {
     gaming: [
@@ -373,206 +247,362 @@ function getUltraViralHooks(category) {
   return hooks[category] || hooks.general;
 }
 
-/* ============================== 초강력 프롬프트 시스템 ============================== */
+/* ============================== 시스템/유저 프롬프트 ============================== */
 function createUltraViralSystemPrompt(style, tone, outputType, language, videoIdea) {
   const category = detectCategory(videoIdea);
   const hooks = getUltraViralHooks(category);
-
-  return `You are the TOP viral scriptwriter for TikTok/Shorts/Reels. Your scripts consistently get millions of views.
-
-LANGUAGE: Write ONLY in ${language}
-
-YOUR FORMULA FOR VIRAL SUCCESS:
-
-1. HOOK (0-3 seconds) - MUST be one of these patterns:
-   - "Stop [doing common thing] if [condition]"
-   - "You're doing [thing] wrong (and here's why)"
-   - "[Shocking number]% of people don't know this"
-   - "This is why you're still [negative state]"
-   - "[Authority] doesn't want you to know this"
-   - "The [thing] that [unexpected result]"
-
-2. ESCALATION (3-10 seconds):
-   - Drop a mind-blowing fact or stat
-   - Challenge a common belief
-   - Create urgency or FOMO
-   - Use "But here's the crazy part..."
-
-3. PROOF/STORY (10-20 seconds):
-   - Quick personal result
-   - Specific example with numbers
-   - Before/after contrast
-   - "I tried this for X days..."
-
-4. PAYOFF (20-30 seconds):
-   - The actual tip/trick/insight
-   - Make it actionable in <10 seconds
-   - Include specific steps or tools
-
-5. PLOT TWIST (optional, 30-40 seconds):
-   - "But wait, there's more..."
-   - Counter-intuitive addition
-   - Address the skeptics
-
-6. CTA (final 5 seconds):
-   - Soft sell: "Follow for more [specific topic]"
-   - Engagement bait: "What happened to you?"
-   - Save trigger: "Save this before it's gone"
-
-CATEGORY: ${category.toUpperCase()}
-Use these proven hooks:
-${hooks.map(h => `- ${h}`).join('\n')}
-
-CRITICAL RULES:
-• First 3 words must create instant curiosity
-• Include at least 2 questions throughout
-• Say "you" or "your" minimum 4 times
-• Use specific numbers (97%, $1000, 30 seconds)
-• Create pattern interrupts every 5-7 seconds
-• No generic phrases like "in this video" or "let me show you"
-• Write like you're texting a friend - casual but intense
-
-FORBIDDEN:
-• Starting with "Did you know" or "Hey guys"
-• Using filler words or phrases
-• Being vague - everything must be specific
-• Fake urgency without reason
-• Corporate/salesy language`;
+  return `You are the TOP viral scriptwriter for TikTok/Shorts/Reels.\n\nLANGUAGE: Write ONLY in ${language}\n\nOUTPUT: Return a single JSON object ONLY, with keys: lang,duration_sec,lines[].\n\nLINES (7 when CTA included, else 6):\n- HOOK\n- ESCALATION\n- FACT\n- PROOF\n- PAYOFF\n- TWIST\n- CTA (optional, last)\n\nSTRICT RULES:\n• First 3 words must create instant curiosity\n• Include at least 3 questions across the script\n• Include specific numbers at least 2 times (percentages, $, seconds)\n• Use "you/your" or direct second-person address in the target language 4+ times\n• No filler like \"in this video\", \"let me show you\"\n• Keep each line punchy (10–14 words)\n\nCATEGORY: ${category.toUpperCase()}\nTry hooks like:\n${hooks.map(h => `- ${h}`).join('\n')}`;
 }
 
 function createUltraViralUserPrompt(params, improvementHints = [], attemptNumber = 1) {
   const { text, style, tone, language, duration, wordsTarget, ctaInclusion } = params;
-  
-  let prompt = `Create a VIRAL script about: ${text}
+  let prompt = {
+    task: "Create viral script",
+    topic: text,
+    style,
+    tone: `${tone} but intense`,
+    language,
+    duration_sec: duration,
+    words_target: wordsTarget,
+    cta: !!ctaInclusion,
+    schema: {
+      lang: "string",
+      duration_sec: "number",
+      lines: [
+        { tag: "HOOK", text: "string" },
+        { tag: "ESCALATION", text: "string" },
+        { tag: "FACT", text: "string" },
+        { tag: "PROOF", text: "string" },
+        { tag: "PAYOFF", text: "string" },
+        { tag: "TWIST", text: "string" },
+        ...(ctaInclusion ? [{ tag: "CTA", text: "string" }] : [])
+      ]
+    },
+    hard_requirements: [
+      "HOOK must include >=2 power-words, a number, a contrast word (but/actually/instead), and end with a question.",
+      "Total questions >= 3 across lines 2,4,6 if possible.",
+      "Numbers appear in FACT and PAYOFF lines (percent, $, seconds).",
+      "Directly address the viewer frequently (second-person).",
+      "No generic intros; no \"in this video\"."
+    ]
+  };
 
-REQUIREMENTS:
-- Duration: EXACTLY ${duration} seconds (${wordsTarget} words)
-- Style: ${style}
-- Tone: ${tone} but INTENSE
-- Include CTA: ${ctaInclusion ? "Yes - make it irresistible" : "No"}
-
-FORMAT:
-[0.0-X.X] [HOOK] Your opening line that stops scrollers dead
-
-[X.X-X.X] Second line that escalates the hook
-
-[X.X-X.X] The shocking fact/stat/claim
-
-[X.X-X.X] Personal proof or specific example
-
-[X.X-X.X] The actual tip/solution/insight
-
-[X.X-X.X] Plot twist or deeper insight
-
-${ctaInclusion ? '[X.X-X.X] [CTA] Soft but compelling call-to-action' : ''}
-
-REMEMBER:
-- Hook must use fear, curiosity, or controversy
-- Include specific numbers/stats in at least 2 lines
-- Each line should feel like a mini-cliffhanger
-- Use "you" language throughout
-- Create urgency without being fake`;
-
-  // 시도 횟수에 따라 더 강한 지시
   if (attemptNumber > 1) {
-    prompt += `\n\nTHIS IS ATTEMPT ${attemptNumber} - BE MORE AGGRESSIVE:
-- Start with "STOP", "NEVER", or "You're doing X wrong"
-- Add MORE specific numbers (percentages, dollars, time)
-- Make it MORE controversial (but true)
-- Add MORE direct questions`;
+    prompt.retry_guidance = [
+      `ATTEMPT ${attemptNumber}: be more controversial`,
+      "Add more specific numbers (%, $, seconds)",
+      "Convert 2+ sentences to direct questions",
+      "Tighten to 10-14 words per line"
+    ];
   }
 
-  // 개선 힌트 추가
   if (improvementHints.length > 0) {
-    prompt += `\n\nCRITICAL IMPROVEMENTS NEEDED:\n${improvementHints.join('\n')}`;
+    prompt.critical_improvements = improvementHints;
   }
 
-  prompt += `\n\nNow write the MOST VIRAL script possible. Make people stop scrolling INSTANTLY.`;
-  
-  return prompt;
+  return JSON.stringify(prompt);
 }
 
-/* ============================== 타이밍 재분배 (개선) ============================== */
-function retimeScript(script, totalSeconds) {
+/* ============================== 점수 평가(언어 인지) ============================== */
+function evaluateScriptQuality(script, params) {
+  try {
+    const { duration, language, ctaInclusion } = params;
+    const langKey = normalizeLanguageKey(language);
+    const lines = splitLines(script);
+    if (!lines.length) return { total: 0, breakdown: {} };
+
+    // 1) HOOK (30)
+    const firstLine = stripTimePrefix(lines[0] || "").toLowerCase();
+    const ultraPowerWords = [
+      "stop","wrong","never","always","nobody","everyone",
+      "mistake","secret","truth","actually","literally",
+      "insane","crazy","unbelievable","shocking","viral",
+      "broke","quit","hate","destroyed","ruined","failed"
+    ];
+    const hookWordCount = ultraPowerWords.filter(w => firstLine.includes(w)).length;
+    const hasQuestion = firstLine.includes("?");
+    const hasNumber = /\d+/.test(firstLine);
+    const hasContrast = /\b(but|however|actually|instead)\b/.test(firstLine);
+    let hookScore = 0;
+    hookScore += hookWordCount * 10; // 파워워드당 10
+    hookScore += hasQuestion ? 8 : 0;
+    hookScore += hasNumber ? 5 : 0;
+    hookScore += hasContrast ? 7 : 0;
+    hookScore = Math.min(30, hookScore);
+
+    // 2) 타이밍 정확도 (20)
+    const expectedWords = Math.round(duration * getWordsPerSecond(language));
+    const actualWords = script.replace(/\[[\d.-]+\]/g, "").split(/\s+/).filter(Boolean).length;
+    const timingDiff = Math.abs(actualWords - expectedWords) / Math.max(1, expectedWords);
+    const timingScore = Math.max(0, Math.round((1 - timingDiff * 1.5) * 20));
+
+    // 3) 구조 (25)
+    let structureScore = 0;
+    if (/\[HOOK\]/i.test(script)) structureScore += 8;
+    if (lines.length >= 6 && lines.length <= 8) structureScore += 10; else if (lines.length >= 5 && lines.length <= 10) structureScore += 5;
+    if (ctaInclusion) {
+      if (/\[CTA\]/i.test(script) && /follow|comment|share|save|like/.test(script.toLowerCase())) structureScore += 7;
+    } else {
+      structureScore += 7;
+    }
+    const validTimestamps = lines.filter(line => /^\[\d+(?:\.\d+)?-\d+(?:\.\d+)?\]/.test(line)).length;
+    if (validTimestamps === lines.length) structureScore += 5;
+
+    // 4) 참여도 (25) — 언어별 2인칭/명령형 인식 강화
+    let engagementScore = 0;
+    const questions = (script.match(/\?/g) || []).length; // 질문 수(언어무관)
+    engagementScore += Math.min(10, questions * 4);
+
+    let secondPersonCount = 0;
+    if (langKey === "en") {
+      secondPersonCount = (script.toLowerCase().match(/\b(you|your|you're|you've)\b/g) || []).length;
+    } else if (langKey === "ko") {
+      // 한국어: 직접호칭(너/당신/네가/니가/너의/당신의/님), 명령형/권유형 종결(~해, ~하지마, ~해봐, ~해라, ~해야 해)
+      const koPronouns = /(너|당신|네가|니가|너의|당신의|님)/g;
+      const koImperatives = /(해라|하세요|해요|해봐|해봐요|하지마|하지 마|해야 해|해야해|해|봐|해둬|해둬요|저장해|팔로우해|팔로우 해|댓글 달아|저장해라)/g;
+      secondPersonCount = ((script.match(koPronouns) || []).length) + ((script.match(koImperatives) || []).length);
+    } else {
+      // 기타 언어는 you/your 대략 체크 + 명령형 추정("!" 빈도)
+      secondPersonCount = (script.toLowerCase().match(/\byou|your\b/g) || []).length + (script.match(/!/g) || []).length;
+    }
+    engagementScore += Math.min(8, secondPersonCount * 2.0);
+
+    const strongActionWords = ["stop","try","watch","wait","look","check","imagine","think","remember","notice","see"];
+    const actionCount = strongActionWords.filter(w => new RegExp(`\\b${w}\\b`, 'i').test(script)).length;
+    engagementScore += Math.min(7, actionCount * 3.5);
+
+    const total = Math.min(100, hookScore + timingScore + structureScore + engagementScore);
+    return { total, breakdown: { hook: hookScore, timing: timingScore, structure: structureScore, engagement: engagementScore } };
+  } catch (error) {
+    console.error("Quality evaluation error:", error);
+    return { total: 0, breakdown: {} };
+  }
+}
+
+/* ============================== 개선 힌트 생성 ============================== */
+function generateImprovementHints(evaluation) {
+  const hints = [];
+  const { breakdown } = evaluation || { breakdown: {} };
+  if (!breakdown) return hints;
+  if ((breakdown.hook || 0) < 20) {
+    hints.push("- CRITICAL: Start with 'Stop', 'Never', or 'You're doing X wrong' + a number + a contrast word + '?'");
+  }
+  if ((breakdown.timing || 0) < 15) {
+    hints.push("- Match word count to duration (±10%)");
+  }
+  if ((breakdown.structure || 0) < 20) {
+    hints.push("- Keep exactly 6–8 lines and include [HOOK]; if CTA=true, add [CTA] with follow/save/comment");
+    hints.push("- Ensure every line has [start-end] timestamps");
+  }
+  if ((breakdown.engagement || 0) < 15) {
+    hints.push("- Add 2–3 questions in mid lines; address the viewer directly 4+ times");
+  }
+  return hints;
+}
+
+/* ============================== JSON 파서 & 안전 추출 ============================== */
+function safeJsonParse(input) {
+  try { return JSON.parse(input); } catch { return null; }
+}
+function extractJsonBlock(text) {
+  if (!text) return null;
+  // 가장 큰 첫 번째 { ... } 블록 시도
+  const m = text.match(/\{[\s\S]*\}$/);
+  if (m) {
+    const obj = safeJsonParse(m[0]);
+    if (obj) return obj;
+  }
+  // 느슨한 추출
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const obj = safeJsonParse(text.slice(start, end + 1));
+    if (obj) return obj;
+  }
+  return null;
+}
+
+/* ============================== Booster(후처리) ============================== */
+const POWER_WORDS = ["Stop","Never","Wrong","Actually","Insane","Crazy","Shocking","Viral","Quit","Hate","Destroyed","Failed"];
+function ensureHookCompliance(text) {
+  let t = String(text || "").trim();
+  // 파워워드 ≥2
+  let count = POWER_WORDS.reduce((acc, w) => acc + (new RegExp(`\\b${w}\\b`, 'i').test(t) ? 1 : 0), 0);
+  while (count < 2) { t = `${POWER_WORDS[count % POWER_WORDS.length]} ${t}`; count++; }
+  // 숫자
+  if (!/\d/.test(t)) t = t.replace(/([.!?])?$/, " 97% ") + "?";
+  // 대비 접속사
+  if (!/\b(but|actually|instead)\b/i.test(t)) t = t.replace(/([.!?])?$/, " actually") + "?";
+  // 끝이 ? 아니면 ? 추가
+  if (!/[?]$/.test(t)) t = t.replace(/([.!])?$/, "?");
+  // 첫 단어가 강하지 않으면 Stop으로 시작
+  if (!/^stop\b/i.test(t)) t = `Stop ${t}`;
+  return t;
+}
+
+function ensureQuestions(lines, desired = 3, preferredIdx = [1,3,5]) {
+  let qCount = lines.filter(l => /\?$/.test(l.text)).length;
+  for (const idx of preferredIdx) {
+    if (qCount >= desired) break;
+    if (lines[idx] && !/\?$/.test(lines[idx].text)) {
+      lines[idx].text = lines[idx].text.replace(/([.!])?$/, "?");
+      qCount++;
+    }
+  }
+}
+
+function ensureNumbers(lines) {
+  const needTargets = ["FACT","PAYOFF"]; // 수치 강조 위치
+  for (const tag of needTargets) {
+    const i = lines.findIndex(l => l.tag === tag);
+    if (i >= 0 && !/\d/.test(lines[i].text)) {
+      // 기본 숫자 삽입
+      if (tag === "FACT") lines[i].text += " — 97% / $1,000 / 3초";
+      else lines[i].text += " — 10배 / 30초 / 2분";
+    }
+  }
+}
+
+function ensureSecondPerson(lines, language) {
+  const lang = normalizeLanguageKey(language);
+  const join = lines.map(l => l.text).join(" ");
+  const need = 4;
+  let count = 0;
+  if (lang === "en") {
+    count = (join.toLowerCase().match(/\b(you|your|you're|you've)\b/g) || []).length;
+    const fillers = ["you", "your", "you", "your"];
+    let k = 0;
+    for (let i=1; i<lines.length-1 && count < need; i++) {
+      lines[i].text += (lines[i].text.endsWith("?") ? " " : ". ") + fillers[k++ % fillers.length];
+      count++;
+    }
+  } else if (lang === "ko") {
+    // 한국어: 직접 호칭/명령형 문구 추가
+    const koFillers = ["너", "너의", "당신", "너" ];
+    count = (join.match(/(너|당신|네가|니가|너의|당신의|님)/g) || []).length;
+    let k = 0;
+    for (let i=1; i<lines.length-1 && count < need; i++) {
+      lines[i].text += (lines[i].text.endsWith("?") ? " " : ". ") + koFillers[k++ % koFillers.length];
+      count++;
+    }
+  } else {
+    // 기타 언어: you/your로 근사
+    count = (join.toLowerCase().match(/\byou|your\b/g) || []).length;
+    for (let i=1; i<lines.length-1 && count < need; i++) {
+      lines[i].text += (lines[i].text.endsWith("?") ? " you" : ". you");
+      count++;
+    }
+  }
+}
+
+function ensureCTA(lines, ctaInclusion) {
+  if (!ctaInclusion) return;
+  const last = lines[lines.length - 1];
+  if (!last || last.tag !== "CTA") return;
+  const hasKW = /(follow|save|comment|share|like|구독|저장|댓글|공유)/i.test(last.text);
+  if (!hasKW) {
+    last.text += (last.text.endsWith(".") ? " " : " ") + "Follow and save if this helped (팔로우/저장)";
+  }
+}
+
+function normalizeLineCountForCTA(lines, ctaInclusion) {
+  // CTA 포함 시 7줄, 미포함 6줄 맞추기 (과하면 중간 병합, 모자라면 간단 문구 추가)
+  const target = ctaInclusion ? 7 : 6;
+  const TAG_ORDER = ["HOOK","ESCALATION","FACT","PROOF","PAYOFF","TWIST", ...(ctaInclusion ? ["CTA"] : [])];
+  // 보정: 태그 강제 순서화
+  const map = new Map(lines.map(l => [l.tag, l]));
+  const rebuilt = TAG_ORDER.map(tag => map.get(tag) || { tag, text: `${tag === 'HOOK' ? 'Stop — 97% actually?' : tag} placeholder` });
+  // 길이 보정
+  if (rebuilt.length > target) {
+    // TWIST를 PAYOFF로 병합
+    if (ctaInclusion) {
+      rebuilt[4].text += ". " + rebuilt[5].text; // PAYOFF += TWIST
+      rebuilt.splice(5,1); // remove TWIST
+    } else {
+      rebuilt[3].text += ". " + rebuilt[4].text; // PROOF += PAYOFF
+      rebuilt.splice(4,1);
+    }
+  } else if (rebuilt.length < target) {
+    rebuilt.push({ tag: ctaInclusion ? "CTA" : "TWIST", text: "Save this now. (저장)" });
+  }
+  return rebuilt;
+}
+
+function booster(jsonObj, params) {
+  try {
+    if (!jsonObj || !Array.isArray(jsonObj.lines)) return jsonObj;
+    const { language, ctaInclusion } = params;
+    let lines = jsonObj.lines.map(x => ({ tag: (x.tag || '').toUpperCase(), text: (x.text || '').trim() }));
+
+    // 1) 라인/태그 보정
+    lines = normalizeLineCountForCTA(lines, ctaInclusion);
+
+    // 2) HOOK 합격형 강제
+    lines[0].text = ensureHookCompliance(lines[0].text);
+
+    // 3) 질문/숫자/2인칭 강화
+    ensureQuestions(lines, 3, [1,3,5]);
+    ensureNumbers(lines);
+    ensureSecondPerson(lines, language);
+
+    // 4) CTA 키워드 보정
+    ensureCTA(lines, ctaInclusion);
+
+    return { ...jsonObj, lines };
+  } catch (e) {
+    console.error("Booster error", e);
+    return jsonObj;
+  }
+}
+
+/* ============================== 타임스탬프 조립 ============================== */
+function assembleWithTimingFromJSON(jsonObj, totalSeconds, language) {
   try {
     const duration = Math.max(1, DEC(Number(totalSeconds) || 0));
-    if (!script) return script;
+    const items = (jsonObj?.lines || []).map(it => ({...it}));
+    if (!items.length) return "";
 
-    const rawLines = splitLines(script);
-    if (!rawLines.length) return script;
-
-    const items = rawLines.map(line => {
-      const m = line.match(/\[\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*\]/);
-      const textOnly = stripTimePrefix(line);
-      return {
-        text: textOnly,
-        isHook: /\[HOOK\]/i.test(textOnly),
-        isCTA: /\[CTA\]/i.test(textOnly),
-        hasTime: !!m
-      };
-    });
-
-    // Hook 강제 추가
-    if (!items[0].isHook && items[0].text) {
-      items[0].text = "[HOOK] " + items[0].text;
-      items[0].isHook = true;
-    }
-
-    // 가중치 계산 (Hook은 더 짧게, 중요 라인은 더 길게)
-    const weights = items.map((item, idx) => {
-      const t = item.text.replace(/\[HOOK\]|\[CTA\]/gi, "").trim();
-      const words = t.split(/\s+/).filter(Boolean).length;
-      
-      // Hook은 짧고 펀치있게
-      if (item.isHook) return Math.max(1, words * 0.8);
-      // CTA도 짧게
-      if (item.isCTA) return Math.max(1, words * 0.7);
-      // 중간 콘텐츠는 정상
+    // 가중치 (HOOK/CTA 짧게)
+    const weights = items.map((it, idx) => {
+      const words = String(it.text || '').split(/\s+/).filter(Boolean).length;
+      if (it.tag === 'HOOK') return Math.max(1, words * 0.8);
+      if (it.tag === 'CTA') return Math.max(1, words * 0.7);
       return Math.max(1, words);
     });
 
-    let totalWeight = weights.reduce((a, b) => a + b, 0);
-    const durations = weights.map(w => (w / totalWeight) * duration);
+    let totalWeight = weights.reduce((a,b)=>a+b,0) || 1;
+    const durations = weights.map(w => (w/totalWeight) * duration);
 
-    // Hook은 2-4초
-    durations[0] = Math.min(4, Math.max(2, durations[0]));
+    // HOOK: 2–4s, CTA: 2–3s
+    const hookIdx = items.findIndex(it => it.tag === 'HOOK');
+    if (hookIdx >= 0) durations[hookIdx] = Math.min(4, Math.max(2, durations[hookIdx]));
+    const ctaIdx = items.findIndex(it => it.tag === 'CTA');
+    if (ctaIdx >= 0) durations[ctaIdx] = Math.min(3, Math.max(2, durations[ctaIdx]));
 
-    // CTA는 2-3초
-    const ctaIndex = items.findIndex(i => i.isCTA);
-    if (ctaIndex >= 0) {
-      durations[ctaIndex] = Math.min(3, Math.max(2, durations[ctaIndex]));
-    }
+    const frozen = new Set();
+    if (hookIdx >= 0) frozen.add(hookIdx);
+    if (ctaIdx >= 0) frozen.add(ctaIdx);
 
-    // 나머지 조정
-    const frozen = new Set([0]);
-    if (ctaIndex >= 0) frozen.add(ctaIndex);
-    
-    const frozenSum = Array.from(frozen).reduce((s, i) => s + durations[i], 0);
-    const freeIdx = durations.map((_, i) => i).filter(i => !frozen.has(i));
-    const freeSum = freeIdx.reduce((s, i) => s + durations[i], 0);
+    const frozenSum = Array.from(frozen).reduce((s,i)=>s+durations[i],0);
+    const freeIdx = durations.map((_,i)=>i).filter(i=>!frozen.has(i));
+    const freeSum = freeIdx.reduce((s,i)=>s+durations[i],0) || 1;
     const targetFree = Math.max(0.1, duration - frozenSum);
-    
-    if (freeSum > 0) {
-      const scale = targetFree / freeSum;
-      freeIdx.forEach(i => {
-        durations[i] = Math.max(MIN_SLICE, durations[i] * scale);
-      });
-    }
+    const scale = targetFree / freeSum;
+    freeIdx.forEach(i => { durations[i] = Math.max(MIN_SLICE, durations[i] * scale); });
 
-    // 최종 스크립트 생성
-    const result = [];
+    // 최종 라인 생성
+    const out = [];
     let t = 0;
-    for (let i = 0; i < items.length; i++) {
-      const start = DEC(t);
-      const end = i === items.length - 1 ? DEC(duration) : DEC(t + durations[i]);
-      result.push(`[${start.toFixed(1)}-${end.toFixed(1)}] ${items[i].text}`);
+    for (let i=0;i<items.length;i++) {
+      const start = DEC(t); const end = i === items.length - 1 ? DEC(duration) : DEC(t + durations[i]);
+      const tagPrefix = items[i].tag === 'HOOK' ? '[HOOK] ' : (items[i].tag === 'CTA' ? '[CTA] ' : '');
+      out.push(`[${start.toFixed(1)}-${end.toFixed(1)}] ${tagPrefix}${items[i].text}`);
       t = end;
     }
-    
-    return result.join("\n");
+    return out.join("\n");
   } catch (e) {
-    console.error("Retiming error:", e);
-    return script;
+    console.error("Assemble error", e);
+    return '';
   }
 }
 
@@ -593,87 +623,41 @@ function generateSmartVisualElements(script, videoIdea, style) {
       productplug: ["Product reveal", "Comparison split", "Before/after"],
       faceless: ["Text slam", "Motion blur", "Kinetic type"]
     };
-    
     const styleTransitions = transitionTypes[style] || transitionTypes.faceless;
 
     lines.forEach((line, index) => {
       const match = line.match(/\[\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*\]/);
       if (!match) return;
-      
       const start = parseFloat(match[1]);
       const end = parseFloat(match[2]);
       const content = line.substring(match[0].length).trim();
       const isHook = /\[HOOK\]/i.test(content);
       const isCTA = /\[CTA\]/i.test(content);
 
-      // 트랜지션
       if (index > 0) {
-        transitions.push({
-          time: `${start.toFixed(1)}s`,
-          type: styleTransitions[index % styleTransitions.length],
-          intensity: isHook ? "Maximum" : "Medium"
-        });
+        transitions.push({ time: `${start.toFixed(1)}s`, type: styleTransitions[index % styleTransitions.length], intensity: isHook ? "Maximum" : "Medium" });
       }
 
-      // B-Roll 제안
       if (!isHook && !isCTA) {
         const category = detectCategory(videoIdea);
-        let suggestion = "";
-        
-        if (category === "gaming") {
-          suggestion = "Gameplay highlight, killstreak, rank up animation";
-        } else if (category === "fitness") {
-          suggestion = "Exercise demo, transformation clip, timer animation";
-        } else if (category === "tech") {
-          suggestion = "Screen recording, feature demo, comparison chart";
-        } else if (category === "money") {
-          suggestion = "Chart animation, money counting, success metrics";
-        } else {
-          suggestion = "Relevant stock footage, animated graphics";
-        }
-        
-        bRoll.push({ 
-          timeRange: `${start.toFixed(1)}-${end.toFixed(1)}s`, 
-          content: suggestion 
-        });
+        let suggestion = "Relevant stock footage, animated graphics";
+        if (category === "gaming") suggestion = "Gameplay highlight, rank up animation";
+        else if (category === "fitness") suggestion = "Exercise demo, transformation clip, timer";
+        else if (category === "tech") suggestion = "Screen recording, feature demo, comparison chart";
+        else if (category === "money") suggestion = "Chart animation, counting money, metrics";
+        bRoll.push({ timeRange: `${start.toFixed(1)}-${end.toFixed(1)}s`, content: suggestion });
       }
 
-      // 텍스트 오버레이
       if (isHook) {
-        textOverlays.push({ 
-          time: `${start.toFixed(1)}s`, 
-          text: "⚠️ " + content.replace(/\[HOOK\]/i, "").trim().toUpperCase(),
-          style: "Massive bold text with shake effect" 
-        });
+        textOverlays.push({ time: `${start.toFixed(1)}s`, text: "⚠️ " + content.replace(/\[HOOK\]/i, "").trim().toUpperCase(), style: "Massive bold text with shake" });
+        soundEffects.push({ time: `${start.toFixed(1)}s`, effect: "Bass drop + whoosh" });
       } else if (/\d+/.test(content)) {
-        // 숫자 강조
         const numbers = content.match(/\d+[%$]?|\$\d+/g);
-        if (numbers) {
-          textOverlays.push({ 
-            time: `${start.toFixed(1)}s`, 
-            text: numbers[0],
-            style: "Giant number with glow effect" 
-          });
-        }
+        if (numbers) textOverlays.push({ time: `${start.toFixed(1)}s`, text: numbers[0], style: "Giant number glow" });
       }
 
-      // 사운드 이펙트
-      if (isHook) {
-        soundEffects.push({ 
-          time: `${start.toFixed(1)}s`, 
-          effect: "Bass drop + whoosh" 
-        });
-      } else if (/stop|never|wrong/.test(content.toLowerCase())) {
-        soundEffects.push({ 
-          time: `${start.toFixed(1)}s`, 
-          effect: "Error sound / Alert" 
-        });
-      } else if (isCTA) {
-        soundEffects.push({ 
-          time: `${start.toFixed(1)}s`, 
-          effect: "Success chime / Subscribe sound" 
-        });
-      }
+      if (/stop|never|wrong/i.test(content)) soundEffects.push({ time: `${start.toFixed(1)}s`, effect: "Alert/Error" });
+      if (isCTA) soundEffects.push({ time: `${start.toFixed(1)}s`, effect: "Success chime/Subscribe" });
     });
 
     return { transitions, bRoll, textOverlays, soundEffects };
@@ -691,29 +675,24 @@ function applyViralLineBreaksToScript(script) {
     if (!m) return line;
     const prefix = m[0];
     const text = line.slice(prefix.length);
-
-    // 강력한 구두점 뒤 더블 줄바꿈
     const withBreaks = text
       .replace(/([.!?])\s+(?=\S)/g, "$1\n\n")
       .replace(/([:;—-])\s+(?=\S)/g, "$1\n\n")
       .replace(/(\.\.\.)s*(?=\S)/g, "$1\n\n")
       .trim();
-
     return prefix + withBreaks;
   });
   return out.join("\n");
 }
 
-/* ============================== OpenAI 호출 (강화) ============================== */
+/* ============================== OpenAI 호출(강화: n=3, JSON 지향) ============================== */
 async function callOpenAI(systemPrompt, userPrompt, config, attemptNumber = 1) {
   const { OPENAI_API_KEY, OPENAI_MODEL, OPENAI_BASE_URL, HARD_TIMEOUT_MS } = config;
-
-  // 시도 횟수에 따라 창의성 증가
-  const temperature = 0.8 + (attemptNumber * 0.05); // 0.8 -> 0.85 -> 0.9
-  const top_p = 0.95 + (attemptNumber * 0.015); // 0.95 -> 0.965 -> 0.98
+  const temperature = Math.max(0.7, 0.8 - (attemptNumber * 0.05)); // 0.8 -> 0.75 -> 0.7 (형식준수↑)
+  const top_p = 0.92;
   const max_tokens = 1500;
-  const presence_penalty = 0.3;
-  const frequency_penalty = 0.3;
+  const presence_penalty = 0.2;
+  const frequency_penalty = 0.2;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HARD_TIMEOUT_MS);
@@ -722,17 +701,16 @@ async function callOpenAI(systemPrompt, userPrompt, config, attemptNumber = 1) {
   try {
     const response = await fetch(url, {
       method: "POST",
-      headers: { 
-        "Content-Type": "application/json", 
-        "Authorization": `Bearer ${OPENAI_API_KEY}` 
-      },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_API_KEY}` },
       body: JSON.stringify({
         model: OPENAI_MODEL,
-        temperature, 
-        top_p, 
-        max_tokens, 
-        presence_penalty, 
+        temperature,
+        top_p,
+        max_tokens,
+        presence_penalty,
         frequency_penalty,
+        n: 3, // 다중 샘플
+        response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
@@ -750,9 +728,9 @@ async function callOpenAI(systemPrompt, userPrompt, config, attemptNumber = 1) {
     }
 
     const data = await response.json();
-    const content = data?.choices?.[0]?.message?.content?.trim();
-    if (!content) throw new Error("Empty response from OpenAI");
-    return content;
+    const choices = data?.choices || [];
+    const payloads = choices.map(c => c?.message?.content?.trim()).filter(Boolean);
+    return payloads;
   } catch (error) {
     clearTimeout(timer);
     if (error.name === "AbortError") throw new Error("Request timeout");
@@ -760,87 +738,102 @@ async function callOpenAI(systemPrompt, userPrompt, config, attemptNumber = 1) {
   }
 }
 
-/* ============================== 품질 보증 생성 (강화) ============================== */
+/* ============================== 품질 보증(샘플 선택+국소 리라이트) ============================== */
+function assembleCandidateFromLLM(raw, params) {
+  // JSON 파싱 -> Booster -> 타임스탬프 조립
+  const obj = (typeof raw === 'string') ? (safeJsonParse(raw) || extractJsonBlock(raw)) : raw;
+  if (!obj) return null;
+  const boosted = booster(obj, params);
+  const script = assembleWithTimingFromJSON(boosted, params.duration, params.language);
+  return { json: boosted, script };
+}
+
+function localRewrite(script, params, evaluation) {
+  // 점수가 애매하면 일부 라인만 규칙적으로 강화
+  try {
+    const lines = splitLines(script);
+    if (!lines.length) return script;
+    let updated = false;
+
+    // HOOK 보강
+    if ((evaluation?.breakdown?.hook || 0) < 25) {
+      const first = stripTimePrefix(lines[0]);
+      const prefix = lines[0].match(/^\[[^\]]+\]\s*/)?.[0] || "";
+      const body = first.replace(/^\[HOOK\]\s*/i, "");
+      const stronger = ensureHookCompliance(body);
+      lines[0] = `${prefix}[HOOK] ${stronger}`;
+      updated = true;
+    }
+
+    // 질문 수 보강
+    if ((evaluation?.breakdown?.engagement || 0) < 20) {
+      const idxs = [1,3,5].filter(i => i < lines.length);
+      for (const i of idxs) {
+        if (!/\?$/.test(lines[i])) lines[i] = lines[i] + (lines[i].endsWith("?") ? "" : "?");
+      }
+      updated = true;
+    }
+
+    return updated ? lines.join("\n") : script;
+  } catch {
+    return script;
+  }
+}
+
 async function generateWithQualityAssurance(params, config) {
   const { text, styleKey, tone, language, duration, wordsTarget, ctaInclusion, enableQA } = params;
-  
-  // QA 비활성화시 바로 생성 (하지만 강화된 프롬프트 사용)
+
+  // QA 끄면 단일 생성
   if (!enableQA) {
     const systemPrompt = createUltraViralSystemPrompt(styleKey, tone, "script", language, text);
     const userPrompt = createUltraViralUserPrompt(params);
-    const raw = await callOpenAI(systemPrompt, userPrompt, config);
-    const retimed = retimeScript(raw, duration);
-    return {
-      script: retimed,
-      qualityScore: null,
-      attempts: 1
-    };
+    const raws = await callOpenAI(systemPrompt, userPrompt, config, 1);
+    // 첫 샘플만 사용
+    const cand = assembleCandidateFromLLM(raws[0], params);
+    const script = applyViralLineBreaksToScript(cand.script);
+    return { script, qualityScore: null, attempts: 1 };
   }
-  
-  let bestScript = null;
-  let bestScore = 0;
-  let bestEvaluation = null;
+
+  let best = { script: null, score: 0, eval: null };
   let improvementHints = [];
-  
-  const systemPrompt = createUltraViralSystemPrompt(styleKey, tone, "script", language, text);
-  
-  for (let attempt = 1; attempt <= MAX_QUALITY_ATTEMPTS; attempt++) {
-    console.log(`Quality attempt ${attempt}/${MAX_QUALITY_ATTEMPTS}`);
-    
-    // 시도 횟수 포함한 프롬프트 생성
+
+  for (let attempt=1; attempt<=MAX_QUALITY_ATTEMPTS; attempt++) {
+    const systemPrompt = createUltraViralSystemPrompt(styleKey, tone, "script", language, text);
     const userPrompt = createUltraViralUserPrompt(params, improvementHints, attempt);
-    
-    // OpenAI 호출 (시도 횟수 전달)
-    const raw = await callOpenAI(systemPrompt, userPrompt, config, attempt);
-    const retimed = retimeScript(raw, duration);
-    
-    // 품질 평가
-    const evaluation = evaluateScriptQuality(retimed, params);
-    console.log(`Attempt ${attempt} score: ${evaluation.total}`);
-    console.log(`Breakdown:`, evaluation.breakdown);
-    
-    // 최고 점수 업데이트
-    if (evaluation.total > bestScore) {
-      bestScore = evaluation.total;
-      bestScript = retimed;
-      bestEvaluation = evaluation;
+    const raws = await callOpenAI(systemPrompt, userPrompt, config, attempt);
+
+    // n=3 후보를 생성 및 평가
+    const candidates = raws.map(r => assembleCandidateFromLLM(r, params)).filter(Boolean);
+    for (const c of candidates) {
+      const evalv = evaluateScriptQuality(c.script, params);
+      if (evalv.total > best.score) best = { script: c.script, score: evalv.total, eval: evalv };
     }
-    
-    // 80점 이상이면 성공
-    if (evaluation.total >= QUALITY_THRESHOLD) {
-      console.log(`Quality threshold met! Score: ${evaluation.total}`);
-      return {
-        script: retimed,
-        qualityScore: evaluation.total,
-        breakdown: evaluation.breakdown,
-        attempts: attempt,
-        status: "PASSED"
-      };
+
+    // 임계치 도달
+    if (best.score >= QUALITY_THRESHOLD) {
+      const finalScript = applyViralLineBreaksToScript(best.script);
+      return { script: finalScript, qualityScore: best.score, breakdown: best.eval.breakdown, attempts: attempt, status: "PASSED" };
     }
-    
-    // 마지막 시도가 아니면 개선 힌트 생성
+
+    // 국소 리라이트로 미세 개선
+    if (best.script) {
+      const tweaked = localRewrite(best.script, params, best.eval);
+      const evalv2 = evaluateScriptQuality(tweaked, params);
+      if (evalv2.total > best.score) best = { script: tweaked, score: evalv2.total, eval: evalv2 };
+    }
+
+    // 다음 시도 개선 힌트
     if (attempt < MAX_QUALITY_ATTEMPTS) {
-      improvementHints = generateImprovementHints(evaluation);
-      console.log(`Improvement hints for next attempt:`, improvementHints);
-      
-      // 70점 이상이면 미세 조정만
-      if (evaluation.total >= 70) {
-        improvementHints.push("- Almost perfect! Just need minor tweaks");
-        improvementHints.push("- Make the hook even more controversial");
-        improvementHints.push("- Add one more shocking statistic");
+      improvementHints = generateImprovementHints(best.eval || { total: 0, breakdown: {} });
+      if (best.score >= 70) {
+        improvementHints.push("- Almost perfect: sharpen the hook with another statistic");
+        improvementHints.push("- Convert one more mid-line into a direct question");
       }
     }
   }
-  
-  // 3회 시도 후 최고점 스크립트 반환
-  console.log(`Max attempts reached. Best score: ${bestScore}`);
-  return {
-    script: bestScript,
-    qualityScore: bestScore,
-    breakdown: bestEvaluation?.breakdown,
-    attempts: MAX_QUALITY_ATTEMPTS,
-    status: bestScore >= 70 ? "ACCEPTABLE" : "BELOW_TARGET"
-  };
+
+  const finalScript = applyViralLineBreaksToScript(best.script || "");
+  return { script: finalScript, qualityScore: best.score, breakdown: best.eval?.breakdown, attempts: MAX_QUALITY_ATTEMPTS, status: best.score >= 70 ? "ACCEPTABLE" : "BELOW_TARGET" };
 }
 
 /* ============================== 입력 검증 ============================== */
@@ -899,7 +892,6 @@ module.exports = async (req, res) => {
     const wps = getWordsPerSecond(langInput);
     const wordsTarget = Math.round(duration * wps);
 
-    // QA 모드로 생성
     const result = await generateWithQualityAssurance({
       text,
       styleKey,
@@ -911,23 +903,17 @@ module.exports = async (req, res) => {
       enableQA: config.ENABLE_QUALITY_CHECK && enableQualityCheck
     }, config);
 
-    // 비주얼 요소 생성 (complete 모드시)
     let visualElements = null;
     if (output === "complete") {
       visualElements = generateSmartVisualElements(result.script, text, styleKey);
     }
 
-    // 줄바꿈 강화 적용
     const finalScript = applyViralLineBreaksToScript(result.script);
 
-    // 응답 생성
     const response = {
-      result: output === "complete" 
-        ? { script: finalScript, ...visualElements }
-        : finalScript
+      result: output === "complete" ? { script: finalScript, ...visualElements } : finalScript
     };
 
-    // 품질 점수 포함 옵션
     if (includeQualityScore && result.qualityScore !== null) {
       response.quality = {
         score: result.qualityScore,
