@@ -28,11 +28,11 @@ function setupCORS(req, res) {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean)
-    .map((v) => { try { return new URL(v).origin; } catch { return v; } });
+    .map((v) => { try { return new URL(v).origin; } catch (e) { return v; } });
 
   const o = req.headers.origin || "";
   let requestOrigin = null;
-  try { requestOrigin = o ? new URL(o).origin : null; } catch { requestOrigin = o || null; }
+  try { requestOrigin = o ? new URL(o).origin : null; } catch (e) { requestOrigin = o || null; }
 
   // Always set core CORS headers
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -61,12 +61,12 @@ function setupCORS(req, res) {
 
   res.setHeader("Access-Control-Allow-Origin", originToAllow);
   return true;
-} catch { return v; } });
+} catch (e) { return v; } });
 
   const requestOrigin = (() => {
     const o = req.headers.origin;
     if (!o) return null;
-    try { return new URL(o).origin; } catch { return o; }
+    try { return new URL(o).origin; } catch (e) { return o; }
   })();
 
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -125,7 +125,7 @@ function readRawBody(req, limitBytes = MAX_BODY_BYTES) {
       size += c.length;
       if (size > limitBytes) {
         reject(Object.assign(new Error("Payload too large"), { status: 413 }));
-        try { req.destroy(); } catch {}
+        try { req.destroy(); } catch (e) {}
         return;
       }
       raw += c;
@@ -140,7 +140,7 @@ async function parseRequestBody(req) {
   const ctype = (req.headers["content-type"] || "").toLowerCase();
   if (!ctype.includes("application/json")) return {};
   const raw = await readRawBody(req).catch((err) => { throw err; });
-  try { return JSON.parse(raw || "{}"); } catch { return {}; }
+  try { return JSON.parse(raw || "{}"); } catch (e) { return {}; }
 }
 
 /* ============================== 언어/속도 ============================== */
@@ -391,7 +391,7 @@ async function evaluateScriptQuality(script, params, config) {
     const data = await response.json();
     const content = data?.choices?.[0]?.message?.content?.trim();
     let obj;
-    try { obj = JSON.parse(content); } catch { obj = null; }
+    try { obj = JSON.parse(content); } catch (e) { obj = null; }
 
     const score = Math.max(0, Math.min(100, Number(obj?.score) || 0));
     const suggestions = Array.isArray(obj?.suggestions) ? obj.suggestions.slice(0,5) : [];
@@ -428,7 +428,7 @@ function generateImprovementHints(evaluation) {
 
 /* ============================== JSON 파서 & 안전 추출 ============================== */
 function safeJsonParse(input) {
-  try { return JSON.parse(input); } catch { return null; }
+  try { return JSON.parse(input); } catch (e) { return null; }
 }
 function extractJsonBlock(text) {
   if (!text) return null;
@@ -811,7 +811,7 @@ function localRewrite(script, params, evaluation) {
     }
 
     return updated ? lines.join("\n") : script;
-  } catch {
+  } catch (e) {
     return script;
   }
 }
