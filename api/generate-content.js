@@ -19,13 +19,49 @@ const MAX_QUALITY_ATTEMPTS = 3;
 
 /* ============================== CORS 설정 ============================== */
 function setupCORS(req, res) {
+  // Open-by-default CORS with allowlist + safe fallback
   const rawList = process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || "";
   const allowServerNoOrigin = (process.env.ALLOW_SERVER_NO_ORIGIN === "1" || process.env.ALLOW_SERVER_NO_ORIGIN === "true");
+  const fallbackOpen = process.env.CORS_FALLBACK_OPEN !== "false"; // default: true
+
   const ALLOW_LIST = rawList
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean)
     .map((v) => { try { return new URL(v).origin; } catch { return v; } });
+
+  const o = req.headers.origin || "";
+  let requestOrigin = null;
+  try { requestOrigin = o ? new URL(o).origin : null; } catch { requestOrigin = o || null; }
+
+  // Always set core CORS headers
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+  res.setHeader("Access-Control-Max-Age", "600");
+  res.setHeader("Vary", "Origin");
+
+  const hasOrigin = !!requestOrigin;
+  const listEmpty = ALLOW_LIST.length === 0;
+  const allowAll = ALLOW_LIST.includes("*");
+
+  let originToAllow = "*";
+  if (allowAll || (listEmpty && (hasOrigin || allowServerNoOrigin))) {
+    originToAllow = hasOrigin ? requestOrigin : "*";
+  } else if (hasOrigin && ALLOW_LIST.includes(requestOrigin)) {
+    originToAllow = requestOrigin;
+  } else if (fallbackOpen) {
+    // Fallback: open for dev/preview environments
+    originToAllow = hasOrigin ? requestOrigin : "*";
+  } else if (!hasOrigin && allowServerNoOrigin) {
+    originToAllow = "*";
+  } else {
+    // Strict block path, but still emit header for transparent preflight
+    originToAllow = hasOrigin ? requestOrigin : "*";
+  }
+
+  res.setHeader("Access-Control-Allow-Origin", originToAllow);
+  return true;
+} catch { return v; } });
 
   const requestOrigin = (() => {
     const o = req.headers.origin;
