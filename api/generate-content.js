@@ -672,8 +672,6 @@ function generateSmartVisualElements(script, videoIdea, style) {
 function applyViralLineBreaksToScript(script) {
   // 분석기 혼동 방지: 원문 그대로 반환
   return String(script || "");
-});
-  return out.join("\n");
 }
 
 /* ============================== OpenAI 호출(강화: n=3, JSON 지향) ============================== */
