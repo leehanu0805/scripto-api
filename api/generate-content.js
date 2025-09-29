@@ -9,7 +9,7 @@
 
 const DEFAULT_MODEL = "gpt-4o-mini";
 const MAX_BODY_BYTES = Math.max(256_000, Math.min(Number(process.env.MAX_BODY_BYTES) || 1_000_000, 5_000_000));
-const HARD_TIMEOUT_MS = Math.max(20000, Math.min(Number(process.env.HARD_TIMEOUT_MS) || 45000, 90000);
+const HARD_TIMEOUT_MS = Math.max(20000, Math.min(Number(process.env.HARD_TIMEOUT_MS) || 45000, 90000));
 
 /* -------- fetch polyfill -------- */
 const _fetch = (typeof fetch === "function")
