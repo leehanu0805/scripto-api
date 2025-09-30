@@ -1,10 +1,11 @@
 "use strict";
 
 /* ==========================================================
-   Scripto — Flexible Script Generator (단일콜, ≤ 1분)
-   - 줄 갯수 고정 안함: "아이디어 바뀔 때마다" 라인 끊기
-   - 프롬프트에 예시 박제, em dash 금지, 최소 후처리
-   - 타임스탬프는 라인 길이(단어수) 비율로 가변 할당
+   Scripto — Flexible Script Generator + Self-Judge (≤ 1분)
+   - 1차: n=5 후보 생성 → 2차: 같은 모델로 채점(JSON) → 1등만 제출
+   - 줄 갯수 고정 안 함(아이디어 바뀔 때마다 줄바꿈)
+   - 예시 10개 박제, em dash 금지, 최소 후처리
+   - 타임스탬프는 단어 수 비율로 가변 배분
    ========================================================== */
 
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -17,7 +18,7 @@ const HARD_TIMEOUT_MS = Math.max(
   Math.min(Number(process.env.HARD_TIMEOUT_MS) || 45000, 90000)
 );
 
-/* -------- fetch polyfill -------- */
+/* -------- fetch polyfill (Node18에선 기본 fetch 있음) -------- */
 const _fetch =
   typeof fetch === "function"
     ? fetch
@@ -47,8 +48,7 @@ function setupCORS(req, res) {
 /* -------- body parse -------- */
 function readRawBody(req, limitBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
-    let size = 0,
-      raw = "";
+    let size = 0, raw = "";
     req.on("data", (c) => {
       size += c.length;
       if (size > limitBytes) {
@@ -98,38 +98,35 @@ function allocateDurationsByWords(lines, totalSec) {
   if (!sum) sum = lines.length || 1;
   // 1차 배분
   let slices = counts.map(c => (c/sum)*dur);
-  // 최소 보장
-  const deficit = slices.reduce((d,x)=> d + Math.max(0, MIN_SLICE - x), 0);
+  // 최소 보장 및 재정규화
+  const need = slices.map(x => Math.max(0, MIN_SLICE - x));
+  let deficit = need.reduce((a,b)=>a+b,0);
   if (deficit > 0) {
     const poolIdx = slices.map((x,i)=>[x,i]).filter(([x])=>x>MIN_SLICE).map(([,i])=>i);
     let pool = poolIdx.reduce((s,i)=> s + (slices[i]-MIN_SLICE), 0);
     if (pool > 0) {
       for (const i of poolIdx) {
-        const give = Math.min(slices[i]-MIN_SLICE, deficit * ((slices[i]-MIN_SLICE)/pool));
-        slices[i] -= give;
+        const spare = slices[i]-MIN_SLICE;
+        const give = spare / pool * deficit;
+        slices[i] -= Math.min(spare, give);
       }
     }
-    // 다시 최소로 채우기
-    for (let i=0;i<slices.length;i++) slices[i] = Math.max(MIN_SLICE, slices[i]);
-    // 총합 재정규화
+    // 최소 채우기
+    slices = slices.map(x => Math.max(MIN_SLICE, x));
     const sum2 = slices.reduce((a,b)=>a+b,0);
-    if (sum2 !== dur) {
-      const scale = dur / sum2;
-      slices = slices.map(x => x*scale);
-    }
+    const scale = dur / sum2;
+    slices = slices.map(x => x*scale);
   }
-  // 누적 타임스탬프 생성
+  // 누적 타임스탬프
   let t = 0;
-  const out = [];
-  for (let i=0;i<lines.length;i++) {
+  return lines.map((line, i) => {
     const start = t; t += slices[i];
     const end = (i === lines.length-1) ? dur : t;
-    out.push(`[${start.toFixed(1)}-${end.toFixed(1)}] ${lines[i]}`);
-  }
-  return out.join("\n");
+    return `[${start.toFixed(1)}-${end.toFixed(1)}] ${line}`;
+  }).join("\n");
 }
 
-/* -------- OpenAI -------- */
+/* -------- OpenAI 공통 호출 -------- */
 async function callOpenAI({ system, user, n = 1, temperature = 0.72 }) {
   const url = `${(process.env.OPENAI_BASE_URL || "https://api.openai.com").replace(/\/+$/,"")}/v1/chat/completions`;
   const key = process.env.OPENAI_API_KEY;
@@ -147,7 +144,7 @@ async function callOpenAI({ system, user, n = 1, temperature = 0.72 }) {
         temperature,
         top_p: 0.92,
         n,
-        max_tokens: 1200,
+        max_tokens: 1400,
         presence_penalty: 0.1,
         frequency_penalty: 0.2,
         response_format: { type: "json_object" },
@@ -172,7 +169,7 @@ async function callOpenAI({ system, user, n = 1, temperature = 0.72 }) {
   }
 }
 
-/* -------- prompts (예시 박제 + em dash 금지 + 자유 줄바꿈) -------- */
+/* -------- 생성용 System Prompt (예시 10개, 자유 줄바꿈, em dash 금지) -------- */
 function buildSystemPrompt(language, topic) {
   const lang = normalizeLang(language);
   return `You are a short-form scriptwriter who writes sharp, concrete scripts.
@@ -228,10 +225,88 @@ EXAMPLES (STYLE ANCHORS, DO NOT COPY VERBATIM; counts vary naturally):
  "One charge now covers work, gym, and dinner.",
  "Endurance comes from settings, not from babying the phone."
 ]
+
+// 4) Ramen upgrades
+[
+ "Ramen upgrade in three tweaks, want a better bowl?",
+ "Flat salty punch keeps feeling boring, right?",
+ "Finish with a small splash of milk for body.",
+ "Add one spoon garlic oil for aroma, remove funk.",
+ "Single egg keeps broth clear while tasting richer.",
+ "Cook noodles seventy percent first, then season for balance.",
+ "Order beats ingredients when flavor keeps falling flat."
+]
+
+// 5) Three-account budgeting
+[
+ "Paycheck control in three accounts, ready to keep more?",
+ "Bills and spending collide and keep stressing you, right?",
+ "Move fixed costs automatically on payday, every month.",
+ "Auto transfer to bills first, then see only leftovers.",
+ "Impulse buys stand out when the balance is honest.",
+ "Save twenty percent monthly automatically, card stabilizes.",
+ "Design beats willpower, structure quietly controls behavior."
+]
+
+// 6) Dating text timing
+[
+ "Text timing rules in three moments, want smoother chats?",
+ "Left on read and momentum keeps collapsing, right?",
+ "No games, cool emotions before you reply.",
+ "Answer within five minutes, keep it concise and clear.",
+ "Pressure drops, rhythm syncs, threads finally stay alive.",
+ "A week later, date invitations often double in frequency.",
+ "Consistency builds attraction more than mystery ever does."
+]
+
+// 7) Notion five-minute planning
+[
+ "Daily plan in five minutes, want calm on screen?",
+ "Tasks stare back and you cannot begin, right?",
+ "Use three tags only to set priority today.",
+ "Important, Quick, Low energy, tag and collapse clutter.",
+ "Only today’s work remains visible and actionable.",
+ "Context switching drops thirty percent, completions pop.",
+ "Tools help, but your rules make the tool useful."
+]
+
+// 8) English pronunciation routine
+[
+ "Pronunciation in ten minutes, want quicker clean speech?",
+ "You know phrases, your tongue freezes at endings, right?",
+ "Record five minimal pairs and shadow them back.",
+ "Repeat immediately while watching waveform and stress.",
+ "Final consonants sharpen and stress finally clicks.",
+ "One week later, phone calls feel twenty percent clearer.",
+ "Repetition grows muscle, not new vocabulary lists."
+]
+
+// 9) Travel packing lists
+[
+ "Pack lighter with three lists, want room in your bag?",
+ "Missing items abroad keep draining cash, right?",
+ "Make three columns and add checkboxes now.",
+ "Clothing, toiletries, electronics, tick each before zipping.",
+ "Final check finishes relaxed in five minutes.",
+ "Unnecessary purchases drop thirty percent, moving feels lighter.",
+ "Pack completely, not heavily, that is the advantage."
+]
+
+// 10) Interview STAR in thirty seconds
+[
+ "Interview answers in thirty seconds, want a clear frame?",
+ "Stories ramble and your point keeps getting buried?",
+ "Use STAR, then keep every line crisp.",
+ "Situation one line, Task one, Action two lines.",
+ "Interviewers note faster and follow ups get predictable.",
+ "Answer length halves while impact finally lands.",
+ "Structure guides attention more than credentials do."
+]
 `;
 }
 
-function buildUserPrompt({ text, language, duration, ctaInclusion, tone, style }) {
+/* -------- User Prompt (스키마는 단순: lines: [string]) -------- */
+function buildUserPrompt({ text, language, duration, tone, style }) {
   return JSON.stringify({
     task: "flex_script_v1",
     topic: text,
@@ -239,13 +314,53 @@ function buildUserPrompt({ text, language, duration, ctaInclusion, tone, style }
     style: style || "faceless",
     language: normalizeLang(language),
     duration_sec: Math.max(15, Math.min(Number(duration) || 45, 180)),
-    cta: !!ctaInclusion,
-    // schema 안내만, 실제 라인 수는 자유
-    schema: {
-      lang: "string",
-      lines: ["string"]
-    }
+    schema: { lang: "string", lines: ["string"] }
   });
+}
+
+/* -------- Judge (같은 모델로 2차 호출, 셀프 채점) -------- */
+function buildJudgePrompt(topic){
+  return `You are a strict script judge. Score short-form scripts by a rubric and pick the best.
+
+TASK: Given multiple candidates, score each on a 0–100 scale and return JSON:
+{
+  "candidates":[
+    {"index":0,"score":{"total":90,"breakdown":{"hook":..,"action":..,"proof":..,"numbers":..,"rhythm":..,"clean":..}},"reasons":["...","..."]},
+    ...
+  ],
+  "best_index": <int>
+}
+
+RUBRIC (max points):
+- HOOK impact (25): ends with "?", includes ONE number, mentions TOPIC keyword, ~7–12 words.
+- Actionability (20): concrete, executable steps or settings in ≥1–3 lines.
+- Evidence & Outcome (20): at least one visible effect line and one measurable outcome line.
+- Number discipline (10): 1–3 numeric lines total besides the hook is ideal; more is penalized.
+- Rhythm & Readability (15): average 7–12 words; avoid many overly short (<4) or long (>16) lines.
+- Cleanliness (10): no meta fluff ("in this video"), no emojis, low repetition of starting words.
+
+RULES:
+- Do NOT rewrite lines. Only judge.
+- Scores must be integers. Sum breakdown to total.
+- If two scripts tie, pick fewer lines; if still tied, fewer total words.
+
+TOPIC: ${topic}`;
+}
+async function judgeCandidates(candidates, topic){
+  const system = "You are a careful, deterministic scoring assistant. Strict JSON only.";
+  const user = JSON.stringify({
+    topic,
+    candidates: candidates.map((c, i) => ({ index: i, lines: c.lines }))
+  });
+  const outs = await callOpenAI({
+    system: buildJudgePrompt(topic),
+    user,
+    n: 1,
+    temperature: 0.3 // 판사는 낮게
+  });
+  const obj = JSON.parse(outs[0]);
+  if (!obj || typeof obj.best_index !== "number") throw new Error("Judge failed");
+  return obj; // { candidates:[...], best_index }
 }
 
 /* -------- handler -------- */
@@ -268,7 +383,8 @@ module.exports = async (req, res) => {
     tone = "Casual",
     style = "faceless",
     timestamps = true,    // true면 [start-end] 붙여줌
-    maxLines = 0          // 0이면 제한 없음, 과도할 때만 컷
+    maxLines = 0,         // 0이면 제한 없음(너무 길땐 옵션으로 컷)
+    includeQuality = false
   } = body || {};
 
   if (!text || typeof text !== "string" || text.trim().length < 3) {
@@ -276,32 +392,48 @@ module.exports = async (req, res) => {
   }
 
   try {
+    // 1) 생성 프롬프트
     const system = buildSystemPrompt(language, text);
     const user = buildUserPrompt({ text, language, duration: length, tone, style });
 
-    const outs = await callOpenAI({ system, user, n: 1, temperature: 0.72 });
+    // 2) 후보 5개 생성
+    const outs = await callOpenAI({ system, user, n: 5, temperature: 0.75 });
     if (!outs.length) return res.status(500).json({ error: "Empty response" });
 
-    const obj = JSON.parse(outs[0]);
-    let lines = Array.isArray(obj?.lines)
-      ? obj.lines.map((x) => (typeof x === "string" ? x : String(x?.text || "")))
-      : [];
+    // 3) 파싱 + 최소 후처리
+    const candidates = outs.map((o) => {
+      const obj = JSON.parse(o);
+      let lines = Array.isArray(obj?.lines)
+        ? obj.lines.map(x => typeof x === "string" ? x : String(x?.text || ""))
+        : [];
+      lines = lines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
+      if (maxLines > 0 && lines.length > maxLines) lines = lines.slice(0, maxLines);
+      if (lines.length === 0) lines = ["Write something specific and concrete."];
+      return { lines };
+    });
 
-    // 비어있는 라인 제거 + 최소 후처리
-    lines = lines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
-
-    // 너무 길면 안전하게 컷(원하면 maxLines=0로 해제)
-    const HARD_MAX = maxLines > 0 ? maxLines : 0;
-    if (HARD_MAX > 0 && lines.length > HARD_MAX) {
-      lines = lines.slice(0, HARD_MAX);
+    // 4) 같은 모델로 자동 채점 → 최고 선택
+    let bestIdx = 0, judgeDump = null;
+    try {
+      const judge = await judgeCandidates(candidates, text);
+      bestIdx = judge.best_index;
+      judgeDump = judge;
+    } catch (e) {
+      console.error("[Judge Error]", e?.message || e);
+      bestIdx = 0; // 폴백: 첫 후보
     }
-    if (lines.length === 0) lines = ["Write something specific and concrete."];
+    const best = candidates[bestIdx];
 
+    // 5) 타임스탬프 합성
     const script = timestamps
-      ? allocateDurationsByWords(lines, Math.max(15, Math.min(Number(length) || 45, 180)))
-      : lines.join("\n");
+      ? allocateDurationsByWords(best.lines, Math.max(15, Math.min(Number(length) || 45, 180)))
+      : best.lines.join("\n");
 
-    return res.status(200).json({ result: script });
+    // 6) 응답
+    const payload = { result: script };
+    if (includeQuality && judgeDump) payload.quality = judgeDump;
+    return res.status(200).json(payload);
+
   } catch (error) {
     const msg = String(error?.message || "Internal error");
     if (process.env.DEBUG_ERRORS === "1" || process.env.DEBUG_ERRORS === "true") {
