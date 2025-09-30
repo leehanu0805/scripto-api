@@ -5,7 +5,8 @@
    - 1차: n=5 후보 생성 → 2차: 같은 모델로 채점(JSON) → 1등만 제출
    - 줄 갯수 고정 안 함(아이디어 바뀔 때마다 줄바꿈)
    - 예시 10개 박제, em dash 금지, 최소 후처리
-   - 타임스탬프는 단어 수 비율로 가변 배분
+   - 타임스탬프: 단어 수 비율 + soft flatten, 최소 슬라이스만 보장
+   - 길이 긴데 밀도 부족하면 1회 자동 확장(densify)
    ========================================================== */
 
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -90,38 +91,57 @@ function sanitizeLine(s) {
   out = out.replace(/\s{2,}/g, " ").trim();
   return out;
 }
-function allocateDurationsByWords(lines, totalSec) {
+function getWPS(language){
+  const L = String(language||"").toLowerCase();
+  const isKo = L.includes("korean") || L.includes("한국") || L === "ko";
+  return isKo ? 2.3 : 2.3; // 보수적 속도
+}
+
+// === soft-only allocator: no max cap, min slice + soft flatten ===
+function allocateDurationsByWords(lines, totalSec, opts = {}) {
   const dur = Math.max(1, Number(totalSec) || 45);
-  const MIN_SLICE = 0.4;
-  const counts = lines.map((t) => Math.max(1, wordsArray(t).length));
-  let sum = counts.reduce((a,b) => a+b, 0);
-  if (!sum) sum = lines.length || 1;
-  // 1차 배분
-  let slices = counts.map(c => (c/sum)*dur);
-  // 최소 보장 및 재정규화
-  const need = slices.map(x => Math.max(0, MIN_SLICE - x));
-  let deficit = need.reduce((a,b)=>a+b,0);
-  if (deficit > 0) {
-    const poolIdx = slices.map((x,i)=>[x,i]).filter(([x])=>x>MIN_SLICE).map(([,i])=>i);
-    let pool = poolIdx.reduce((s,i)=> s + (slices[i]-MIN_SLICE), 0);
-    if (pool > 0) {
-      for (const i of poolIdx) {
-        const spare = slices[i]-MIN_SLICE;
-        const give = spare / pool * deficit;
-        slices[i] -= Math.min(spare, give);
-      }
-    }
-    // 최소 채우기
-    slices = slices.map(x => Math.max(MIN_SLICE, x));
-    const sum2 = slices.reduce((a,b)=>a+b,0);
+  const MIN_SLICE = opts.minSlice ?? 0.5; // 최소 발화 보장
+  const ALPHA = (() => {
+    const env = Number(process.env.SLICE_ALPHA);
+    if (!Number.isNaN(env) && env > 0 && env < 1) return env;
+    return opts.alpha ?? 0.82; // 0.75~0.9 사이 추천
+  })();
+
+  // 1) 단어 수 -> soft weight (words^alpha)
+  const words = lines.map(s => Math.max(1, String(s||"").trim().split(/\s+/).filter(Boolean).length));
+  let weights = words.map(w => Math.pow(w, ALPHA));
+  let sumW = weights.reduce((a,b)=>a+b, 0);
+  if (!sumW) { weights = words.map(_=>1); sumW = weights.length; }
+
+  // 2) 1차 배분
+  let slices = weights.map(w => (w / sumW) * dur);
+
+  // 3) 최소 슬라이스 보장 + 재분배 (하드캡 없음)
+  let deficit = 0;
+  const spare = slices.map(x => {
+    if (x < MIN_SLICE) deficit += (MIN_SLICE - x);
+    return Math.max(0, x - MIN_SLICE);
+  });
+  const pool = spare.reduce((a,b)=>a+b, 0);
+
+  if (deficit > 0 && pool > 0) {
+    const poolSafe = pool || 1;
+    slices = slices.map((x, i) => {
+      if (x <= MIN_SLICE) return MIN_SLICE; // 최소 보장
+      const give = (spare[i] / poolSafe) * deficit;
+      return Math.max(MIN_SLICE, x - Math.min(spare[i], give));
+    });
+    // 총합 재정규화
+    const sum2 = slices.reduce((a,b)=>a+b, 0) || 1;
     const scale = dur / sum2;
-    slices = slices.map(x => x*scale);
+    slices = slices.map(x => x * scale);
   }
-  // 누적 타임스탬프
+
+  // 4) 누적 타임스탬프 생성
   let t = 0;
   return lines.map((line, i) => {
     const start = t; t += slices[i];
-    const end = (i === lines.length-1) ? dur : t;
+    const end = (i === lines.length - 1) ? dur : t;
     return `[${start.toFixed(1)}-${end.toFixed(1)}] ${line}`;
   }).join("\n");
 }
@@ -305,16 +325,29 @@ EXAMPLES (STYLE ANCHORS, DO NOT COPY VERBATIM; counts vary naturally):
 `;
 }
 
-/* -------- User Prompt (스키마는 단순: lines: [string]) -------- */
+/* -------- User Prompt (밀도 힌트 포함) -------- */
 function buildUserPrompt({ text, language, duration, tone, style }) {
+  const duration_sec = Math.max(15, Math.min(Number(duration) || 45, 180));
+  const wps = getWPS(language);
+  const target_words = Math.round(duration_sec * wps);
+  const lines_target_hint = Math.round(duration_sec / 6); // 대략 1줄당 5~7초 감각
+
   return JSON.stringify({
-    task: "flex_script_v1",
+    task: "flex_script_v2_density",
     topic: text,
     tone: tone || "Casual",
     style: style || "faceless",
     language: normalizeLang(language),
-    duration_sec: Math.max(15, Math.min(Number(duration) || 45, 180)),
-    schema: { lang: "string", lines: ["string"] }
+    duration_sec,
+    target_words,
+    lines_target_hint,
+    schema: { lang: "string", lines: ["string"] },
+    guidance: [
+      "Aim total words ≈ target_words ±10%.",
+      "Prefer adding more short lines over making lines very long.",
+      "Each line stays concrete: steps, settings, drills, visible effects, measured outcomes.",
+      "Avoid filler or meta. No emojis. No em dash."
+    ]
   });
 }
 
@@ -360,7 +393,33 @@ async function judgeCandidates(candidates, topic){
   });
   const obj = JSON.parse(outs[0]);
   if (!obj || typeof obj.best_index !== "number") throw new Error("Judge failed");
-  return obj; // { candidates:[...], best_index }
+  return obj; // { candidates:[...], best_index, ... }
+}
+
+/* -------- Densify (부족할 때 1회 확장) -------- */
+async function densifyLines(lines, { topic, language, durationSec }) {
+  const target_words = Math.round(getWPS(language) * durationSec);
+  const system = "You expand scripts without fluff. Return JSON { lines: [string] } only.";
+  const user = JSON.stringify({
+    topic,
+    language: normalizeLang(language),
+    duration_sec: durationSec,
+    target_words,
+    current_words: lines.join(" ").trim().split(/\s+/).filter(Boolean).length,
+    lines,
+    rules: [
+      "Keep tone and style. No meta. No emojis. No em dash.",
+      "Increase total words to ~target_words ±10% by adding concise micro-steps, examples, effects.",
+      "Prefer adding new short lines over lengthening existing lines too much.",
+      "Keep numbers useful and minimal. Never end a line with a bare number."
+    ]
+  });
+
+  const outs = await callOpenAI({ system, user, n: 1, temperature: 0.55 });
+  const obj = JSON.parse(outs[0]);
+  let outLines = Array.isArray(obj?.lines) ? obj.lines : [];
+  outLines = outLines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
+  return outLines.length ? outLines : lines; // 실패 시 원본 유지
 }
 
 /* -------- handler -------- */
@@ -408,7 +467,7 @@ module.exports = async (req, res) => {
         : [];
       lines = lines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
       if (maxLines > 0 && lines.length > maxLines) lines = lines.slice(0, maxLines);
-      if (lines.length === 0) lines = ["Write something specific and concrete."];
+      if (lines.length === 0) lines = ["Write something specific and concrete."]; // 안전망
       return { lines };
     });
 
@@ -424,12 +483,28 @@ module.exports = async (req, res) => {
     }
     const best = candidates[bestIdx];
 
-    // 5) 타임스탬프 합성
+    // 5) 길이 대비 밀도 부족하면 1회 확장
+    const durationSec = Math.max(15, Math.min(Number(length) || 45, 180));
+    const targetWords = Math.round(getWPS(language) * durationSec);
+    const currentWords = best.lines.join(" ").trim().split(/\s+/).filter(Boolean).length;
+
+    // 60초 이상이고, 타겟의 85% 미만이면 densify
+    if (durationSec >= 60 && currentWords < targetWords * 0.85) {
+      try {
+        const expanded = await densifyLines(best.lines, { topic: text, language, durationSec });
+        const newWords = expanded.join(" ").split(/\s+/).filter(Boolean).length;
+        if (newWords > currentWords) best.lines = expanded;
+      } catch (e) {
+        console.error("[Densify Error]", e?.message || e);
+      }
+    }
+
+    // 6) 타임스탬프 합성
     const script = timestamps
-      ? allocateDurationsByWords(best.lines, Math.max(15, Math.min(Number(length) || 45, 180)))
+      ? allocateDurationsByWords(best.lines, durationSec)
       : best.lines.join("\n");
 
-    // 6) 응답
+    // 7) 응답
     const payload = { result: script };
     if (includeQuality && judgeDump) payload.quality = judgeDump;
     return res.status(200).json(payload);
