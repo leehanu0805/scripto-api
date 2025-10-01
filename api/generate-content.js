@@ -1,12 +1,12 @@
 "use strict";
 
 /* ==========================================================
-   Scripto — Script Generator API (V2 for IdeaGeneratorV2)
-   - 유지: n=5 후보 생성 → 같은 모델로 채점(JSON) → 1등 채택
-   - 유지: 자유 줄바꿈, em dash 금지, 최소 후처리, soft timestamp
-   - 추가: phase=initial/final, refinementContext/baseScript/previousScript
-   - 추가: outputType = "script" | "complete" (extras 동봉)
-   - 추가: CTA 포함 옵션(ctaInclusion)
+   Scripto — Flexible Script Generator + Self-Judge (≤ 1분)
+   + Step 3.5 AI Chat Refinement 지원
+   - phase: "initial" → 초기 스크립트 생성 (간단)
+   - phase: "refinement-question" → 동적 질문 생성
+   - phase: "final" → 최종 스크립트 (refinement 맥락 반영)
+   - 기존: n=5 후보 → 자동 채점 → 1등 선택
    ========================================================== */
 
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -15,8 +15,8 @@ const MAX_BODY_BYTES = Math.max(
   Math.min(Number(process.env.MAX_BODY_BYTES) || 1_000_000, 5_000_000)
 );
 const HARD_TIMEOUT_MS = Math.max(
-  20_000,
-  Math.min(Number(process.env.HARD_TIMEOUT_MS) || 45_000, 90_000)
+  20000,
+  Math.min(Number(process.env.HARD_TIMEOUT_MS) || 45000, 90000)
 );
 
 /* -------- fetch polyfill -------- */
@@ -72,31 +72,14 @@ async function parseRequestBody(req) {
 }
 
 /* -------- utils -------- */
-const LANG_MAP = new Map([
-  ["ko", "Korean"], ["korean", "Korean"], ["한국어", "Korean"],
-  ["en", "English"], ["english", "English"],
-  ["ja", "Japanese"], ["japanese", "Japanese"], ["日本語", "Japanese"],
-  ["zh", "Chinese"], ["chinese", "Chinese"], ["中文", "Chinese"],
-  ["es", "Spanish"], ["spanish", "Spanish"],
-  ["fr", "French"], ["french", "French"],
-  ["de", "German"], ["german", "German"],
-  ["it", "Italian"], ["italian", "Italian"],
-  ["pt", "Portuguese"], ["portuguese", "Portuguese"],
-  ["nl", "Dutch"], ["dutch", "Dutch"],
-  ["ru", "Russian"], ["russian", "Russian"],
-  ["ar", "Arabic"], ["arabic", "Arabic"],
-]);
 function normalizeLang(language) {
-  const L = String(language || "").trim();
-  if (!L) return "Korean";
-  const key = L.toLowerCase();
-  return LANG_MAP.get(key) || L; // 이름 그대로 들어오면 존중
+  const L = String(language || "").toLowerCase();
+  if (L.includes("korean") || L.includes("한국") || L === "ko") return "Korean";
+  return "English";
 }
-function wordsArray(s){ return String(s||"").trim().split(/\s+/).filter(Boolean); }
 function sanitizeLine(s) {
   let out = String(s || "");
-  out = out.replace(/—/g, ":"); // em dash 금지
-  // 줄 끝 맨숫자 제거(%, 시간, 배, plain number)
+  out = out.replace(/—/g, ":");
   out = out.replace(
     /\s*(?:—|,|:)?\s*(\+?\d+%|\d+(?:\s?(?:sec|secs|seconds|min|minutes|hrs|hours|분|초|시간))|\d+배|\d+)\s*$/i,
     ""
@@ -105,13 +88,14 @@ function sanitizeLine(s) {
   return out;
 }
 function getWPS(language){
-  // 보수적 평균 발화 속도(언어 상관 동일 적용)
-  return 2.3;
+  const L = String(language||"").toLowerCase();
+  const isKo = L.includes("korean") || L.includes("한국") || L === "ko";
+  return isKo ? 2.3 : 2.3;
 }
 
 // === soft-only allocator: no max cap, min slice + soft flatten ===
 function allocateDurationsByWords(lines, totalSec, opts = {}) {
-  const dur = Math.max(15, Math.min(Number(totalSec) || 45, 180));
+  const dur = Math.max(1, Number(totalSec) || 45);
   const MIN_SLICE = opts.minSlice ?? 0.5;
   const ALPHA = (() => {
     const env = Number(process.env.SLICE_ALPHA);
@@ -154,7 +138,7 @@ function allocateDurationsByWords(lines, totalSec, opts = {}) {
 }
 
 /* -------- OpenAI 공통 호출 -------- */
-async function callOpenAI({ system, user, n = 1, temperature = 0.72, max_tokens = 1400 }) {
+async function callOpenAI({ system, user, n = 1, temperature = 0.72 }) {
   const url = `${(process.env.OPENAI_BASE_URL || "https://api.openai.com").replace(/\/+$/,"")}/v1/chat/completions`;
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error("Missing OPENAI_API_KEY");
@@ -171,7 +155,7 @@ async function callOpenAI({ system, user, n = 1, temperature = 0.72, max_tokens 
         temperature,
         top_p: 0.92,
         n,
-        max_tokens,
+        max_tokens: 1400,
         presence_penalty: 0.1,
         frequency_penalty: 0.2,
         response_format: { type: "json_object" },
@@ -196,17 +180,13 @@ async function callOpenAI({ system, user, n = 1, temperature = 0.72, max_tokens 
   }
 }
 
-/* -------- Prompt builders -------- */
-function buildSystemPrompt(language, topic, tone, style) {
+/* -------- 생성용 System Prompt (예시 10개) -------- */
+function buildSystemPrompt(language, topic) {
   const lang = normalizeLang(language);
-  // 기존 철학 유지 + style/tone 힌트만 추가
   return `You are a short-form scriptwriter who writes sharp, concrete scripts.
 
 LANGUAGE: ${lang} ONLY
 RETURN: JSON with { lang, lines: [string] } ONLY. No extra text.
-
-TONE: ${tone || "Casual"}
-STYLE: ${style || "faceless"}
 
 LINE-BREAK PHILOSOPHY:
 - Do NOT fix the number of lines.
@@ -222,22 +202,126 @@ MICRO-RULES:
 
 TOPIC: ${topic}
 
-(You may rephrase the topic inline for naturalness.)`;
+EXAMPLES (STYLE ANCHORS, DO NOT COPY VERBATIM; counts vary naturally):
+
+// 1) Valorant aim
+[
+ "Valorant aim in 10 minutes, ready to level up?",
+ "Crosshair keeps slipping off heads every duel, right?",
+ "Here is the pro secret, commit to one sensitivity.",
+ "Lock one sensitivity and run three tracking drills.",
+ "Shake stabilizes, first bullet hits the same dot.",
+ "Raise headshot rate by twenty percent, rounds feel easier.",
+ "Talent matters less than repeating the same routine daily."
+]
+
+// 2) Ten-minute abs
+[
+ "Abs in ten minutes, think it is actually possible?",
+ "Lower back hurts and your form keeps collapsing, right?",
+ "No magic, start here and stay consistent.",
+ "Hold a thirty second plank, then two dead bug sets.",
+ "Core braces better, shoulder tremble fades as breathing steadies.",
+ "Four weeks consistent, waistline firms and stamina improves.",
+ "Perfect form beats calorie counting for faster definition."
+]
+
+// 3) iPhone battery
+[
+ "iPhone battery all day, want a five minute setup?",
+ "Charging anxiety ruins your commute and evenings, right?",
+ "Change it once, then forget battery stress.",
+ "Enable optimized charging, limit background refresh to essentials.",
+ "Heat drops and standby drain becomes barely noticeable.",
+ "One charge now covers work, gym, and dinner.",
+ "Endurance comes from settings, not from babying the phone."
+]
+
+// 4) Ramen upgrades
+[
+ "Ramen upgrade in three tweaks, want a better bowl?",
+ "Flat salty punch keeps feeling boring, right?",
+ "Finish with a small splash of milk for body.",
+ "Add one spoon garlic oil for aroma, remove funk.",
+ "Single egg keeps broth clear while tasting richer.",
+ "Cook noodles seventy percent first, then season for balance.",
+ "Order beats ingredients when flavor keeps falling flat."
+]
+
+// 5) Three-account budgeting
+[
+ "Paycheck control in three accounts, ready to keep more?",
+ "Bills and spending collide and keep stressing you, right?",
+ "Move fixed costs automatically on payday, every month.",
+ "Auto transfer to bills first, then see only leftovers.",
+ "Impulse buys stand out when the balance is honest.",
+ "Save twenty percent monthly automatically, card stabilizes.",
+ "Design beats willpower, structure quietly controls behavior."
+]
+
+// 6) Dating text timing
+[
+ "Text timing rules in three moments, want smoother chats?",
+ "Left on read and momentum keeps collapsing, right?",
+ "No games, cool emotions before you reply.",
+ "Answer within five minutes, keep it concise and clear.",
+ "Pressure drops, rhythm syncs, threads finally stay alive.",
+ "A week later, date invitations often double in frequency.",
+ "Consistency builds attraction more than mystery ever does."
+]
+
+// 7) Notion five-minute planning
+[
+ "Daily plan in five minutes, want calm on screen?",
+ "Tasks stare back and you cannot begin, right?",
+ "Use three tags only to set priority today.",
+ "Important, Quick, Low energy, tag and collapse clutter.",
+ "Only today's work remains visible and actionable.",
+ "Context switching drops thirty percent, completions pop.",
+ "Tools help, but your rules make the tool useful."
+]
+
+// 8) English pronunciation routine
+[
+ "Pronunciation in ten minutes, want quicker clean speech?",
+ "You know phrases, your tongue freezes at endings, right?",
+ "Record five minimal pairs and shadow them back.",
+ "Repeat immediately while watching waveform and stress.",
+ "Final consonants sharpen and stress finally clicks.",
+ "One week later, phone calls feel twenty percent clearer.",
+ "Repetition grows muscle, not new vocabulary lists."
+]
+
+// 9) Travel packing lists
+[
+ "Pack lighter with three lists, want room in your bag?",
+ "Missing items abroad keep draining cash, right?",
+ "Make three columns and add checkboxes now.",
+ "Clothing, toiletries, electronics, tick each before zipping.",
+ "Final check finishes relaxed in five minutes.",
+ "Unnecessary purchases drop thirty percent, moving feels lighter.",
+ "Pack completely, not heavily, that is the advantage."
+]
+
+// 10) Interview STAR in thirty seconds
+[
+ "Interview answers in thirty seconds, want a clear frame?",
+ "Stories ramble and your point keeps getting buried?",
+ "Use STAR, then keep every line crisp.",
+ "Situation one line, Task one, Action two lines.",
+ "Interviewers note faster and follow ups get predictable.",
+ "Answer length halves while impact finally lands.",
+ "Structure guides attention more than credentials do."
+]
+`;
 }
 
-function buildUserPrompt({ text, language, duration, tone, style, ctaInclusion }) {
+/* -------- User Prompt (밀도 힌트 포함) -------- */
+function buildUserPrompt({ text, language, duration, tone, style }) {
   const duration_sec = Math.max(15, Math.min(Number(duration) || 45, 180));
   const wps = getWPS(language);
   const target_words = Math.round(duration_sec * wps);
   const lines_target_hint = Math.round(duration_sec / 6);
-
-  const guide = [
-    "Aim total words ≈ target_words ±10%.",
-    "Prefer adding more short lines over making lines very long.",
-    "Each line stays concrete: steps, settings, drills, visible effects, measured outcomes.",
-    "Avoid filler or meta. No emojis. No em dash."
-  ];
-  if (ctaInclusion) guide.push("Include ONE concise CTA line near the end (no emojis).");
 
   return JSON.stringify({
     task: "flex_script_v2_density",
@@ -248,12 +332,17 @@ function buildUserPrompt({ text, language, duration, tone, style, ctaInclusion }
     duration_sec,
     target_words,
     lines_target_hint,
-    cta: !!ctaInclusion,
     schema: { lang: "string", lines: ["string"] },
-    guidance: guide
+    guidance: [
+      "Aim total words ≈ target_words ±10%.",
+      "Prefer adding more short lines over making lines very long.",
+      "Each line stays concrete: steps, settings, drills, visible effects, measured outcomes.",
+      "Avoid filler or meta. No emojis. No em dash."
+    ]
   });
 }
 
+/* -------- Judge (같은 모델로 2차 호출) -------- */
 function buildJudgePrompt(topic){
   return `You are a strict script judge. Score short-form scripts by a rubric and pick the best.
 
@@ -281,8 +370,8 @@ RULES:
 
 TOPIC: ${topic}`;
 }
-
 async function judgeCandidates(candidates, topic){
+  const system = "You are a careful, deterministic scoring assistant. Strict JSON only.";
   const user = JSON.stringify({
     topic,
     candidates: candidates.map((c, i) => ({ index: i, lines: c.lines }))
@@ -298,14 +387,13 @@ async function judgeCandidates(candidates, topic){
   return obj;
 }
 
-/* -------- Densify -------- */
-async function densifyLines(lines, { topic, language, durationSec, tone, style, ctaInclusion }) {
+/* -------- Densify (부족할 때 1회 확장) -------- */
+async function densifyLines(lines, { topic, language, durationSec }) {
   const target_words = Math.round(getWPS(language) * durationSec);
   const system = "You expand scripts without fluff. Return JSON { lines: [string] } only.";
   const user = JSON.stringify({
     topic,
     language: normalizeLang(language),
-    tone, style, cta: !!ctaInclusion,
     duration_sec: durationSec,
     target_words,
     current_words: lines.join(" ").trim().split(/\s+/).filter(Boolean).length,
@@ -314,8 +402,7 @@ async function densifyLines(lines, { topic, language, durationSec, tone, style, 
       "Keep tone and style. No meta. No emojis. No em dash.",
       "Increase total words to ~target_words ±10% by adding concise micro-steps, examples, effects.",
       "Prefer adding new short lines over lengthening existing lines too much.",
-      "Keep numbers useful and minimal. Never end a line with a bare number.",
-      ctaInclusion ? "Add one concise CTA line near the end." : "No CTA unless natural."
+      "Keep numbers useful and minimal. Never end a line with a bare number."
     ]
   });
 
@@ -326,78 +413,185 @@ async function densifyLines(lines, { topic, language, durationSec, tone, style, 
   return outLines.length ? outLines : lines;
 }
 
-/* -------- Refinement / Edit -------- */
-async function refineExistingScript(previousLines, { topic, language, durationSec, tone, style, refineHints, ctaInclusion }) {
-  const system = "You carefully revise scripts to match constraints. Return JSON { lines: [string] } only.";
+/* -------- 🆕 Step 3.5: Refinement Question 생성 -------- */
+async function generateRefinementQuestion({ baseScript, conversationHistory, keyword, style }) {
+  // 대화가 5번 이상 진행되었으면 종료
+  if (conversationHistory && conversationHistory.length >= 5) {
+    return { question: null, options: [] };
+  }
+
+  const system = `You are a script refinement assistant. Ask ONE targeted question to improve the script.
+
+RULES:
+- Ask about: tone adjustment, pacing, hook strength, clarity, audience fit, CTA placement
+- Return JSON: { "question": "...", "options": ["option1", "option2", "option3"] }
+- Options should be 2-4 short choices (3-6 words each)
+- If conversation history shows 5+ exchanges, return { "question": null, "options": [] } to end
+- Keep questions SHORT and SPECIFIC`;
+
   const user = JSON.stringify({
-    topic,
-    language: normalizeLang(language),
-    tone, style, cta: !!ctaInclusion,
-    duration_sec: durationSec,
-    lines: previousLines,
-    refine_hints: refineHints || "",
-    rules: [
-      "Preserve strengths of original lines; rewrite minimally to apply hints.",
-      "Keep line-break philosophy and micro-rules.",
-      ctaInclusion ? "Ensure exactly one concise CTA near the end." : "Do not force a CTA."
-    ]
+    keyword,
+    style,
+    baseScript: baseScript?.substring(0, 500) || "",
+    conversationHistory: conversationHistory || [],
+    task: "Generate ONE refinement question with 2-4 options"
   });
-  const outs = await callOpenAI({ system, user, n: 1, temperature: 0.6 });
-  const obj = JSON.parse(outs[0]);
-  let outLines = Array.isArray(obj?.lines) ? obj.lines : [];
-  outLines = outLines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
-  return outLines.length ? outLines : previousLines;
+
+  try {
+    const outs = await callOpenAI({ system, user, n: 1, temperature: 0.65 });
+    const result = JSON.parse(outs[0]);
+    
+    // 질문이 없거나 대화가 충분히 진행되었으면 종료
+    if (!result.question || result.question === null) {
+      return { question: null, options: [] };
+    }
+
+    return {
+      question: result.question,
+      options: Array.isArray(result.options) ? result.options.slice(0, 4) : []
+    };
+  } catch (e) {
+    console.error("[Refinement Question Error]", e?.message || e);
+    return { question: null, options: [] };
+  }
 }
 
-/* -------- Extras builder (for outputType=complete) -------- */
-function parseStamped(script) {
-  // returns [{start,end,text}]
-  const rows = String(script).split(/\n+/).map(s => s.trim()).filter(Boolean);
-  const out = [];
-  for (const r of rows) {
-    const m = r.match(/^\[(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\]\s*(.*)$/);
-    if (m) {
-      out.push({ start: parseFloat(m[1]), end: parseFloat(m[2]), text: m[3] || "" });
+/* -------- 🆕 Phase별 처리 로직 -------- */
+async function handleInitialPhase({ text, language, duration, tone, style }) {
+  // 초기 스크립트 1개만 빠르게 생성 (n=1, 채점 없음)
+  const system = buildSystemPrompt(language, text);
+  const user = buildUserPrompt({ text, language, duration, tone, style });
+
+  const outs = await callOpenAI({ system, user, n: 1, temperature: 0.7 });
+  if (!outs.length) throw new Error("Empty response");
+
+  const obj = JSON.parse(outs[0]);
+  let lines = Array.isArray(obj?.lines)
+    ? obj.lines.map(x => typeof x === "string" ? x : String(x?.text || ""))
+    : [];
+  lines = lines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
+  
+  if (lines.length === 0) lines = ["Write something specific and concrete."];
+
+  // 타임스탬프 없이 리턴
+  return { result: lines.join("\n") };
+}
+
+async function handleRefinementQuestionPhase(body) {
+  const { baseScript, conversationHistory, keyword, style } = body;
+  
+  const result = await generateRefinementQuestion({
+    baseScript,
+    conversationHistory,
+    keyword,
+    style
+  });
+
+  return result;
+}
+
+async function handleFinalPhase(body) {
+  const {
+    text,
+    language = "Korean",
+    length = 45,
+    tone = "Casual",
+    style = "faceless",
+    timestamps = true,
+    maxLines = 0,
+    includeQuality = false,
+    refinementContext = null,
+    baseScript = null,
+    outputType = "script"
+  } = body;
+
+  // refinementContext가 있으면 system prompt에 반영
+  const systemBase = buildSystemPrompt(language, text);
+  const refinementNote = refinementContext 
+    ? `\n\nUSER PREFERENCES from chat: ${refinementContext}\nIncorporate these preferences naturally into the script.`
+    : "";
+  const system = systemBase + refinementNote;
+
+  const user = buildUserPrompt({ text, language, duration: length, tone, style });
+
+  // 후보 5개 생성
+  const outs = await callOpenAI({ system, user, n: 5, temperature: 0.75 });
+  if (!outs.length) throw new Error("Empty response");
+
+  const candidates = outs.map((o) => {
+    const obj = JSON.parse(o);
+    let lines = Array.isArray(obj?.lines)
+      ? obj.lines.map(x => typeof x === "string" ? x : String(x?.text || ""))
+      : [];
+    lines = lines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
+    if (maxLines > 0 && lines.length > maxLines) lines = lines.slice(0, maxLines);
+    if (lines.length === 0) lines = ["Write something specific and concrete."];
+    return { lines };
+  });
+
+  // 자동 채점 → 최고 선택
+  let bestIdx = 0, judgeDump = null;
+  try {
+    const judge = await judgeCandidates(candidates, text);
+    bestIdx = judge.best_index;
+    judgeDump = judge;
+  } catch (e) {
+    console.error("[Judge Error]", e?.message || e);
+    bestIdx = 0;
+  }
+  const best = candidates[bestIdx];
+
+  // 밀도 체크 & densify
+  const durationSec = Math.max(15, Math.min(Number(length) || 45, 180));
+  const targetWords = Math.round(getWPS(language) * durationSec);
+  const currentWords = best.lines.join(" ").trim().split(/\s+/).filter(Boolean).length;
+
+  if (durationSec >= 60 && currentWords < targetWords * 0.85) {
+    try {
+      const expanded = await densifyLines(best.lines, { topic: text, language, durationSec });
+      const newWords = expanded.join(" ").split(/\s+/).filter(Boolean).length;
+      if (newWords > currentWords) best.lines = expanded;
+    } catch (e) {
+      console.error("[Densify Error]", e?.message || e);
     }
   }
-  return out;
-}
-function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
 
-function buildExtrasFromScript(script) {
-  const rows = parseStamped(script);
-  if (!rows.length) return { transitions: [], bRoll: [], textOverlays: [], soundEffects: [] };
+  // Complete package 요청 시 추가 데이터 생성 (간단 버전)
+  let result;
+  if (outputType === "complete") {
+    const scriptText = timestamps
+      ? allocateDurationsByWords(best.lines, durationSec)
+      : best.lines.join("\n");
 
-  // Transitions: cut/wipe/whip/zoom based on beat position
-  const transitions = [];
-  for (let i = 0; i < rows.length - 1; i++) {
-    const t = rows[i].end;
-    const pick = (i % 4 === 0) ? "cut" : (i % 4 === 1) ? "swipe-left" : (i % 4 === 2) ? "whip-pan" : "zoom-in";
-    transitions.push({ time: `${t.toFixed(1)}s`, type: pick, description: `Transition on line change (${pick}).` });
+    result = {
+      script: scriptText,
+      transitions: [
+        { time: "0.0s", type: "Fade In", description: "Opening transition" },
+        { time: `${(durationSec/2).toFixed(1)}s`, type: "Quick Cut", description: "Mid-point emphasis" }
+      ],
+      bRoll: [
+        { timeRange: `0.0-${(durationSec/3).toFixed(1)}s`, content: "Relevant B-roll footage" }
+      ],
+      textOverlays: [
+        { time: "0.5s", text: text, style: "Bold Title" }
+      ],
+      soundEffects: [
+        { time: "0.0s", effect: "Swoosh" }
+      ]
+    };
+  } else {
+    result = timestamps
+      ? allocateDurationsByWords(best.lines, durationSec)
+      : best.lines.join("\n");
   }
 
-  // B-roll: key nouns from each line (very light heuristic)
-  const bRoll = rows.map(({ start, end, text }) => {
-    const words = text.split(/\W+/).filter(Boolean);
-    const nouns = words.filter(w => w.length > 3).slice(0, 3).join(", ");
-    return { timeRange: `${start.toFixed(1)}-${end.toFixed(1)}s`, content: nouns ? `B-roll: ${nouns}` : "B-roll: contextual visual" };
-  });
-
-  // Text overlays: first 5–8 words
-  const textOverlays = rows.map(({ start, text }) => {
-    const words = text.split(/\s+/).slice(0, 8).join(" ");
-    return { time: `${start.toFixed(1)}s`, text: words, style: "bold lower-third" };
-  });
-
-  // SFX: hook + transitions emphasis
-  const soundEffects = [];
-  if (rows.length) soundEffects.push({ time: `${rows[0].start.toFixed(1)}s`, effect: "whoosh-in (hook emphasis)" });
-  transitions.forEach(tr => soundEffects.push({ time: tr.time, effect: "light whoosh" }));
-
-  return { transitions, bRoll, textOverlays, soundEffects };
+  const payload = { result };
+  if (includeQuality && judgeDump) payload.quality = judgeDump;
+  
+  return payload;
 }
 
-/* -------- main handler -------- */
+/* -------- Main Handler -------- */
 module.exports = async (req, res) => {
   if (!setupCORS(req, res)) {
     if (req.method === "OPTIONS") return res.status(204).end();
@@ -407,123 +601,43 @@ module.exports = async (req, res) => {
   if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   let body;
-  try { body = await parseRequestBody(req); }
-  catch (err) { return res.status(err?.status || 400).json({ error: err?.message || "Invalid request body" }); }
-
-  const {
-    text,                 // 주제(필수)
-    style = "faceless",
-    length = 45,
-    tone = "Casual",
-    language = "Korean",
-    ctaInclusion = false,
-    outputType = "script",     // "script" | "complete"
-    phase = "initial",         // "initial" | "final"
-    refinementContext = null,  // 3.5 수집 답변 요약
-    baseScript = "",           // initial 결과(Refine 전 base)
-    previousScript = ""        // 재생성/수정 시 전달
-  } = body || {};
-
-  if (!text || typeof text !== "string" || text.trim().length < 3) {
-    return res.status(400).json({ error: "`text` is required (≥ 3 chars)" });
+  try { 
+    body = await parseRequestBody(req); 
+  } catch (err) { 
+    return res.status(err?.status || 400).json({ error: err.message || "Invalid request body" }); 
   }
 
-  // 내부 공통
-  const langN = normalizeLang(language);
-  const durationSec = Math.max(15, Math.min(Number(length) || 45, 180));
+  const { text, phase } = body || {};
 
+  // Phase별 분기
   try {
-    // ===== 1) 후보 생성 공통 로직 (이전 틀 유지) =====
-    async function generateBestLines(topic, seedLines) {
-      if (Array.isArray(seedLines) && seedLines.length) {
-        // seedLines가 있으면 미세 수정만 요구
-        return await refineExistingScript(seedLines, {
-          topic,
-          language: langN,
-          durationSec,
-          tone, style,
-          refineHints: refinementContext || "",
-          ctaInclusion
-        });
-      }
-
-      const system = buildSystemPrompt(langN, topic, tone, style);
-      const user = buildUserPrompt({ text: topic, language: langN, duration: durationSec, tone, style, ctaInclusion });
-
-      const outs = await callOpenAI({ system, user, n: 5, temperature: 0.75 });
-      if (!outs.length) throw new Error("Empty response");
-      const candidates = outs.map((o) => {
-        const obj = JSON.parse(o);
-        let lines = Array.isArray(obj?.lines)
-          ? obj.lines.map(x => typeof x === "string" ? x : String(x?.text || ""))
-          : [];
-        lines = lines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
-        if (!lines.length) lines = ["Write something specific and concrete."];
-        return { lines };
-      });
-
-      let bestIdx = 0; let judgeDump = null;
-      try {
-        const judge = await judgeCandidates(candidates, topic);
-        bestIdx = judge.best_index;
-        judgeDump = judge;
-      } catch (e) {
-        // 폴백: 첫 후보
-        bestIdx = 0;
-      }
-      let best = candidates[bestIdx].lines;
-
-      // 길이 대비 밀도 보정
-      const targetWords = Math.round(getWPS(langN) * durationSec);
-      const currentWords = best.join(" ").trim().split(/\s+/).filter(Boolean).length;
-      if (durationSec >= 60 && currentWords < targetWords * 0.85) {
-        try {
-          best = await densifyLines(best, { topic, language: langN, durationSec, tone, style, ctaInclusion });
-        } catch {}
-      }
-      return best;
-    }
-
-    // ===== 2) phase 분기 =====
-    let lines;
     if (phase === "initial") {
-      // 초기 스크립트 생성
-      lines = await generateBestLines(text);
-      const scriptStr = allocateDurationsByWords(lines, durationSec);
-      // 프론트는 result 문자열을 바로 읽음
-      return res.status(200).json({ result: scriptStr });
+      if (!text || typeof text !== "string" || text.trim().length < 3) {
+        return res.status(400).json({ error: "`text` is required (≥ 3 chars)" });
+      }
+      const result = await handleInitialPhase(body);
+      return res.status(200).json(result);
     }
 
-    // final 또는 수정/재생성
+    if (phase === "refinement-question") {
+      const result = await handleRefinementQuestionPhase(body);
+      return res.status(200).json(result);
+    }
+
     if (phase === "final") {
-      let seed = [];
-      if (previousScript) {
-        // previousScript(str 또는 타임스탬프 포함 문자열) → 라인화
-        const raw = String(previousScript || "").split(/\n+/).map(s => s.replace(/\[[^\]]+\]\s*/, "").trim()).filter(Boolean);
-        if (raw.length) seed = raw;
-      } else if (baseScript) {
-        const raw = String(baseScript || "").split(/\n+/).map(s => s.replace(/\[[^\]]+\]\s*/, "").trim()).filter(Boolean);
-        if (raw.length) seed = raw;
+      if (!text || typeof text !== "string" || text.trim().length < 3) {
+        return res.status(400).json({ error: "`text` is required (≥ 3 chars)" });
       }
-
-      lines = await generateBestLines(text, seed.length ? seed : undefined);
-      const stamped = allocateDurationsByWords(lines, durationSec);
-
-      if (outputType === "complete") {
-        const extras = buildExtrasFromScript(stamped);
-        return res.status(200).json({
-          script: stamped,
-          ...extras
-        });
-      } else {
-        return res.status(200).json({ script: stamped });
-      }
+      const result = await handleFinalPhase(body);
+      return res.status(200).json(result);
     }
 
-    // 알 수 없는 phase면 initial처럼 동작
-    const fallbackLines = await generateBestLines(text);
-    const fallbackScript = allocateDurationsByWords(fallbackLines, durationSec);
-    return res.status(200).json({ script: fallbackScript });
+    // phase 없으면 기존 로직 (backward compatibility)
+    if (!text || typeof text !== "string" || text.trim().length < 3) {
+      return res.status(400).json({ error: "`text` is required (≥ 3 chars)" });
+    }
+    const result = await handleFinalPhase(body);
+    return res.status(200).json(result);
 
   } catch (error) {
     const msg = String(error?.message || "Internal error");
@@ -532,6 +646,8 @@ module.exports = async (req, res) => {
     } else {
       console.error("[API Error]");
     }
-    return res.status(error?.status || 500).json({ error: process.env.DEBUG_ERRORS ? msg : "Internal server error" });
+    return res.status(error?.status || 500).json({ 
+      error: (process.env.DEBUG_ERRORS ? msg : "Internal server error") 
+    });
   }
 };
