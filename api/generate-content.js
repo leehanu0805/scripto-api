@@ -1,12 +1,13 @@
 "use strict";
 
 /* ==========================================================
-   Scripto — Flexible Script Generator + Self-Judge (≤ 1분)
-   - 1차: n=5 후보 생성 → 2차: 같은 모델로 채점(JSON) → 1등만 제출
-   - 줄 갯수 고정 안 함(아이디어 바뀔 때마다 줄바꿈)
-   - 예시 10개 박제, em dash 금지, 최소 후처리
-   - 타임스탬프: 단어 수 비율 + soft flatten, 최소 슬라이스만 보장
-   - 길이 긴데 밀도 부족하면 1회 자동 확장(densify)
+   Scripto — Q&A + One-shot Hybrid
+   - phase:"question" → 1차 질문만
+   - phase:"final" (+ refineAnswer) → 2차 생성
+   - phase 생략 → 원샷(바로 생성)
+   공통: n=5 후보 → 같은 모델로 셀프채점 → 베스트만 제출
+         밀도 부족 시 densify 1회, 줄수 자유, em dash 금지
+         타임스탬프 = 단어 비율 + soft flatten(최소 슬라이스만 보장)
    ========================================================== */
 
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -19,7 +20,7 @@ const HARD_TIMEOUT_MS = Math.max(
   Math.min(Number(process.env.HARD_TIMEOUT_MS) || 45000, 90000)
 );
 
-/* -------- fetch polyfill (Node18은 기본 fetch 존재) -------- */
+/* -------- fetch polyfill (Node18 기본 fetch) -------- */
 const _fetch =
   typeof fetch === "function"
     ? fetch
@@ -325,16 +326,55 @@ EXAMPLES (STYLE ANCHORS, DO NOT COPY VERBATIM; counts vary naturally):
 `;
 }
 
-/* -------- User Prompt (밀도 힌트 포함) -------- */
-function buildUserPrompt({ text, language, duration, tone, style }) {
+/* -------- Refinement Question (1차) -------- */
+function buildQuestionSystemPrompt(language, topic){
+  const lang = normalizeLang(language);
+  return `You ask ONE sharp refinement question to improve a short-form script.
+LANGUAGE: ${lang} ONLY
+RETURN: strict JSON { "question": string, "options": string[] }.
+
+RULES:
+- One question only, concise, concrete, about the user's intent or constraints.
+- Provide up to 4 short options if applicable (may be empty).
+- No meta like "in this video". No emojis.
+TOPIC: ${topic}`;
+}
+function buildQuestionUserPrompt({ text, language }) {
+  return JSON.stringify({
+    task: "ask_refinement_question",
+    topic: text,
+    language: normalizeLang(language),
+    examples: [
+      { topic: "Valorant aim", question: "Do you want drills for tracking, flicks, or recoil control?", options: ["tracking","flicks","recoil","mixed"] },
+      { topic: "Home workout", question: "Bodyweight only or with dumbbells?", options: ["bodyweight","dumbbells"] }
+    ]
+  });
+}
+async function askRefinementQuestion({ text, language }){
+  const system = buildQuestionSystemPrompt(language, text);
+  const user = buildQuestionUserPrompt({ text, language });
+  const outs = await callOpenAI({ system, user, n: 1, temperature: 0.6 });
+  let q = { question: null, options: [] };
+  try {
+    const obj = JSON.parse(outs[0] || "{}");
+    q.question = typeof obj.question === "string" ? obj.question.trim() : null;
+    q.options  = Array.isArray(obj.options) ? obj.options.filter(Boolean).slice(0,4) : [];
+  } catch {}
+  if (!q.question) q.question = "What single aspect should the script focus on most?";
+  return q;
+}
+
+/* -------- User Prompt (밀도 힌트 + refineAnswer 반영) -------- */
+function buildUserPrompt({ text, language, duration, tone, style, refineAnswer }) {
   const duration_sec = Math.max(15, Math.min(Number(duration) || 45, 180));
   const wps = getWPS(language);
   const target_words = Math.round(duration_sec * wps);
-  const lines_target_hint = Math.round(duration_sec / 6); // 대략 1줄당 5~7초
+  const lines_target_hint = Math.round(duration_sec / 6);
 
   return JSON.stringify({
     task: "flex_script_v2_density",
     topic: text,
+    refine_answer: refineAnswer || "",
     tone: tone || "Casual",
     style: style || "faceless",
     language: normalizeLang(language),
@@ -346,8 +386,9 @@ function buildUserPrompt({ text, language, duration, tone, style }) {
       "Aim total words ≈ target_words ±10%.",
       "Prefer adding more short lines over making lines very long.",
       "Each line stays concrete: steps, settings, drills, visible effects, measured outcomes.",
-      "Avoid filler or meta. No emojis. No em dash."
-    ]
+      "Avoid filler or meta. No emojis. No em dash.",
+      refineAnswer ? `Reflect this preference precisely: ${refineAnswer}` : ""
+    ].filter(Boolean)
   });
 }
 
@@ -442,8 +483,10 @@ module.exports = async (req, res) => {
     tone = "Casual",
     style = "faceless",
     timestamps = true,    // true면 [start-end] 표시
-    maxLines = 0,         // 0이면 제한 없음(너무 길면 옵션으로 컷)
-    includeQuality = false
+    maxLines = 0,         // 0이면 제한 없음
+    includeQuality = false,
+    phase,                // "question" | "final" | undefined
+    refineAnswer          // phase="final"에서 사용
   } = body || {};
 
   if (!text || typeof text !== "string" || text.trim().length < 3) {
@@ -451,15 +494,21 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // 1) 생성 프롬프트
-    const system = buildSystemPrompt(language, text);
-    const user = buildUserPrompt({ text, language, duration: length, tone, style });
+    // === 1) Q&A 1차: 질문만 반환 ===
+    if (phase === "question") {
+      const q = await askRefinementQuestion({ text, language });
+      return res.status(200).json(q);
+    }
 
-    // 2) 후보 5개 생성
+    // === 2) 원샷/최종: 스크립트 생성 ===
+    const system = buildSystemPrompt(language, text);
+    const user   = buildUserPrompt({ text, language, duration: length, tone, style, refineAnswer });
+
+    // 후보 5개 생성
     const outs = await callOpenAI({ system, user, n: 5, temperature: 0.75 });
     if (!outs.length) return res.status(500).json({ error: "Empty response" });
 
-    // 3) 파싱 + 최소 후처리
+    // 파싱 + 최소 후처리
     const candidates = outs.map((o) => {
       const obj = JSON.parse(o);
       let lines = Array.isArray(obj?.lines)
@@ -471,7 +520,7 @@ module.exports = async (req, res) => {
       return { lines };
     });
 
-    // 4) 같은 모델로 자동 채점 → 최고 선택
+    // 같은 모델로 자동 채점 → 최고 선택
     let bestIdx = 0, judgeDump = null;
     try {
       const judge = await judgeCandidates(candidates, text);
@@ -479,16 +528,15 @@ module.exports = async (req, res) => {
       judgeDump = judge;
     } catch (e) {
       console.error("[Judge Error]", e?.message || e);
-      bestIdx = 0; // 폴백: 첫 후보
+      bestIdx = 0; // 폴백
     }
     const best = candidates[bestIdx];
 
-    // 5) 길이 대비 밀도 부족하면 1회 확장
+    // 길이 대비 밀도 부족하면 1회 확장
     const durationSec = Math.max(15, Math.min(Number(length) || 45, 180));
     const targetWords = Math.round(getWPS(language) * durationSec);
     const currentWords = best.lines.join(" ").trim().split(/\s+/).filter(Boolean).length;
 
-    // 60초 이상이고, 타겟의 85% 미만이면 densify
     if (durationSec >= 60 && currentWords < targetWords * 0.85) {
       try {
         const expanded = await densifyLines(best.lines, { topic: text, language, durationSec });
@@ -499,12 +547,12 @@ module.exports = async (req, res) => {
       }
     }
 
-    // 6) 타임스탬프 합성
+    // 타임스탬프 합성
     const script = timestamps
       ? allocateDurationsByWords(best.lines, durationSec)
       : best.lines.join("\n");
 
-    // 7) 응답
+    // 응답
     const payload = { result: script };
     if (includeQuality && judgeDump) payload.quality = judgeDump;
     return res.status(200).json(payload);
