@@ -1,13 +1,14 @@
 "use strict";
 
 /* ==========================================================
-   Scripto — Q&A + One-shot Hybrid
-   - phase:"question" → 1차 질문만
-   - phase:"final" (+ refineAnswer) → 2차 생성
-   - phase 생략 → 원샷(바로 생성)
-   공통: n=5 후보 → 같은 모델로 셀프채점 → 베스트만 제출
-         밀도 부족 시 densify 1회, 줄수 자유, em dash 금지
-         타임스탬프 = 단어 비율 + soft flatten(최소 슬라이스만 보장)
+   Scripto — Flexible Script Generator + Q&A + Self-Judge
+   - phase: "initial" → 초안 1개(빠르게)
+   - phase: "refinement-question" → 1개 질문/옵션(반복), 종료 시 {question:null}
+   - phase: "final" → n=5 후보 → 같은 모델로 채점 → 베스트, 필요 시 densify
+   - phase 생략 → 기존 원샷 루트 (n=5 → 채점 → 베스트)
+   - 줄수 고정 안 함, em dash 금지, 타임스탬프 = soft-alloc(min-slice 보장)
+   - regenerateWithEdit: previousScript 반영
+   - outputType="complete"면 transitions/bRoll/textOverlays/soundEffects 포함
    ========================================================== */
 
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -20,13 +21,12 @@ const HARD_TIMEOUT_MS = Math.max(
   Math.min(Number(process.env.HARD_TIMEOUT_MS) || 45000, 90000)
 );
 
-/* -------- fetch polyfill (Node18 기본 fetch) -------- */
 const _fetch =
   typeof fetch === "function"
     ? fetch
     : (...args) => import("node-fetch").then(({ default: f }) => f(...args));
 
-/* -------- CORS -------- */
+/* ---------------- CORS ---------------- */
 function setupCORS(req, res) {
   const allow = process.env.ALLOWED_ORIGINS || process.env.ALLOWED_ORIGIN || "";
   const origin = (req.headers && req.headers.origin) || "";
@@ -41,21 +41,21 @@ function setupCORS(req, res) {
     res.setHeader("Access-Control-Allow-Origin", origin || "*");
     return true;
   }
-  const list = allow.split(",").map((s) => s.trim()).filter(Boolean);
+  const list = allow.split(",").map(s => s.trim()).filter(Boolean);
   const allowed = list.includes("*") || list.includes(origin);
   res.setHeader("Access-Control-Allow-Origin", allowed ? origin || "*" : "*");
   return true;
 }
 
-/* -------- body parse -------- */
+/* --------------- body parse --------------- */
 function readRawBody(req, limitBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     let size = 0, raw = "";
-    req.on("data", (c) => {
+    req.on("data", c => {
       size += c.length;
       if (size > limitBytes) {
         reject(Object.assign(new Error("Payload too large"), { status: 413 }));
-        try { req.destroy(); } catch (e) {}
+        try { req.destroy(); } catch {}
         return;
       }
       raw += c;
@@ -68,56 +68,49 @@ async function parseRequestBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
   const ctype = (req.headers["content-type"] || "").toLowerCase();
   if (!ctype.includes("application/json")) return {};
-  const raw = await readRawBody(req).catch((err) => { throw err; });
+  const raw = await readRawBody(req).catch(e => { throw e; });
   try { return JSON.parse(raw || "{}"); } catch { return {}; }
 }
 
-/* -------- utils -------- */
+/* ---------------- utils ---------------- */
 function normalizeLang(language) {
   const L = String(language || "").toLowerCase();
   if (L.includes("korean") || L.includes("한국") || L === "ko") return "Korean";
   return "English";
 }
-function wordsArray(s){ return String(s||"").trim().split(/\s+/).filter(Boolean); }
 function sanitizeLine(s) {
   let out = String(s || "");
-  // em dash 금지 → 콜론 치환
-  out = out.replace(/—/g, ":");
-  // 줄 끝 맨숫자 제거(%, 시간, 배, plain number)
+  out = out.replace(/—/g, ":"); // em dash 금지
   out = out.replace(
     /\s*(?:—|,|:)?\s*(\+?\d+%|\d+(?:\s?(?:sec|secs|seconds|min|minutes|hrs|hours|분|초|시간))|\d+배|\d+)\s*$/i,
     ""
   );
-  // 중복 공백 정리
   out = out.replace(/\s{2,}/g, " ").trim();
   return out;
 }
-function getWPS(language){
-  const L = String(language||"").toLowerCase();
+function getWPS(language) {
+  const L = String(language || "").toLowerCase();
   const isKo = L.includes("korean") || L.includes("한국") || L === "ko";
-  return isKo ? 2.3 : 2.3; // 보수값
+  return isKo ? 2.3 : 2.3;
 }
 
-// === soft-only allocator: no max cap, min slice + soft flatten ===
+/** soft-only allocator: min slice 보장 + soft flatten, 하드 max 없음 */
 function allocateDurationsByWords(lines, totalSec, opts = {}) {
   const dur = Math.max(1, Number(totalSec) || 45);
-  const MIN_SLICE = opts.minSlice ?? 0.5; // 최소 발화 보장
+  const MIN_SLICE = opts.minSlice ?? 0.5;
   const ALPHA = (() => {
     const env = Number(process.env.SLICE_ALPHA);
     if (!Number.isNaN(env) && env > 0 && env < 1) return env;
-    return opts.alpha ?? 0.82; // 0.75~0.9 추천
+    return opts.alpha ?? 0.82;
   })();
 
-  // 1) 단어 수 -> soft weight (words^alpha)
   const words = lines.map(s => Math.max(1, String(s||"").trim().split(/\s+/).filter(Boolean).length));
   let weights = words.map(w => Math.pow(w, ALPHA));
-  let sumW = weights.reduce((a,b)=>a+b, 0);
+  let sumW = weights.reduce((a,b)=>a+b,0);
   if (!sumW) { weights = words.map(_=>1); sumW = weights.length; }
 
-  // 2) 1차 배분
   let slices = weights.map(w => (w / sumW) * dur);
 
-  // 3) 최소 슬라이스 보장 + 재분배 (하드캡 없음)
   let deficit = 0;
   const spare = slices.map(x => {
     if (x < MIN_SLICE) deficit += (MIN_SLICE - x);
@@ -128,17 +121,15 @@ function allocateDurationsByWords(lines, totalSec, opts = {}) {
   if (deficit > 0 && pool > 0) {
     const poolSafe = pool || 1;
     slices = slices.map((x, i) => {
-      if (x <= MIN_SLICE) return MIN_SLICE; // 최소 보장
+      if (x <= MIN_SLICE) return MIN_SLICE;
       const give = (spare[i] / poolSafe) * deficit;
       return Math.max(MIN_SLICE, x - Math.min(spare[i], give));
     });
-    // 총합 재정규화
     const sum2 = slices.reduce((a,b)=>a+b, 0) || 1;
     const scale = dur / sum2;
     slices = slices.map(x => x * scale);
   }
 
-  // 4) 누적 타임스탬프 생성
   let t = 0;
   return lines.map((line, i) => {
     const start = t; t += slices[i];
@@ -147,7 +138,7 @@ function allocateDurationsByWords(lines, totalSec, opts = {}) {
   }).join("\n");
 }
 
-/* -------- OpenAI 공통 호출 -------- */
+/* -------------- OpenAI call -------------- */
 async function callOpenAI({ system, user, n = 1, temperature = 0.72 }) {
   const url = `${(process.env.OPENAI_BASE_URL || "https://api.openai.com").replace(/\/+$/,"")}/v1/chat/completions`;
   const key = process.env.OPENAI_API_KEY;
@@ -190,7 +181,7 @@ async function callOpenAI({ system, user, n = 1, temperature = 0.72 }) {
   }
 }
 
-/* -------- 생성용 System Prompt (예시 10개, 자유 줄바꿈, em dash 금지) -------- */
+/* -------- 생성용 System Prompt (예시 10개 박제) -------- */
 function buildSystemPrompt(language, topic) {
   const lang = normalizeLang(language);
   return `You are a short-form scriptwriter who writes sharp, concrete scripts.
@@ -326,73 +317,40 @@ EXAMPLES (STYLE ANCHORS, DO NOT COPY VERBATIM; counts vary naturally):
 `;
 }
 
-/* -------- Refinement Question (1차) -------- */
-function buildQuestionSystemPrompt(language, topic){
-  const lang = normalizeLang(language);
-  return `You ask ONE sharp refinement question to improve a short-form script.
-LANGUAGE: ${lang} ONLY
-RETURN: strict JSON { "question": string, "options": string[] }.
-
-RULES:
-- One question only, concise, concrete, about the user's intent or constraints.
-- Provide up to 4 short options if applicable (may be empty).
-- No meta like "in this video". No emojis.
-TOPIC: ${topic}`;
-}
-function buildQuestionUserPrompt({ text, language }) {
-  return JSON.stringify({
-    task: "ask_refinement_question",
-    topic: text,
-    language: normalizeLang(language),
-    examples: [
-      { topic: "Valorant aim", question: "Do you want drills for tracking, flicks, or recoil control?", options: ["tracking","flicks","recoil","mixed"] },
-      { topic: "Home workout", question: "Bodyweight only or with dumbbells?", options: ["bodyweight","dumbbells"] }
-    ]
-  });
-}
-async function askRefinementQuestion({ text, language }){
-  const system = buildQuestionSystemPrompt(language, text);
-  const user = buildQuestionUserPrompt({ text, language });
-  const outs = await callOpenAI({ system, user, n: 1, temperature: 0.6 });
-  let q = { question: null, options: [] };
-  try {
-    const obj = JSON.parse(outs[0] || "{}");
-    q.question = typeof obj.question === "string" ? obj.question.trim() : null;
-    q.options  = Array.isArray(obj.options) ? obj.options.filter(Boolean).slice(0,4) : [];
-  } catch {}
-  if (!q.question) q.question = "What single aspect should the script focus on most?";
-  return q;
-}
-
-/* -------- User Prompt (밀도 힌트 + refineAnswer 반영) -------- */
-function buildUserPrompt({ text, language, duration, tone, style, refineAnswer }) {
+/* -------- User Prompt (refine/previousScript 반영 가능) -------- */
+function buildUserPrompt({ text, language, duration, tone, style, refinementContext, baseScript, previousScript }) {
   const duration_sec = Math.max(15, Math.min(Number(duration) || 45, 180));
   const wps = getWPS(language);
   const target_words = Math.round(duration_sec * wps);
   const lines_target_hint = Math.round(duration_sec / 6);
 
+  const guidance = [
+    "Aim total words ≈ target_words ±10%.",
+    "Prefer adding more short lines over making lines very long.",
+    "Each line stays concrete: steps, settings, drills, visible effects, measured outcomes.",
+    "Avoid filler or meta. No emojis. No em dash."
+  ];
+  if (refinementContext) guidance.push(`Reflect these user preferences: ${refinementContext}`);
+  if (baseScript) guidance.push("Respect the useful ideas in baseScript but rewrite cleanly.");
+  if (previousScript) guidance.push("Use previousScript as guidance and improve clarity, rhythm, and concreteness.");
+
   return JSON.stringify({
     task: "flex_script_v2_density",
     topic: text,
-    refine_answer: refineAnswer || "",
     tone: tone || "Casual",
     style: style || "faceless",
     language: normalizeLang(language),
     duration_sec,
     target_words,
     lines_target_hint,
+    baseScript: baseScript || null,
+    previousScript: previousScript || null,
     schema: { lang: "string", lines: ["string"] },
-    guidance: [
-      "Aim total words ≈ target_words ±10%.",
-      "Prefer adding more short lines over making lines very long.",
-      "Each line stays concrete: steps, settings, drills, visible effects, measured outcomes.",
-      "Avoid filler or meta. No emojis. No em dash.",
-      refineAnswer ? `Reflect this preference precisely: ${refineAnswer}` : ""
-    ].filter(Boolean)
+    guidance
   });
 }
 
-/* -------- Judge (같은 모델로 2차 호출, 셀프 채점) -------- */
+/* -------- Judge (셀프 채점) -------- */
 function buildJudgePrompt(topic){
   return `You are a strict script judge. Score short-form scripts by a rubric and pick the best.
 
@@ -421,7 +379,6 @@ RULES:
 TOPIC: ${topic}`;
 }
 async function judgeCandidates(candidates, topic){
-  const system = "You are a careful, deterministic scoring assistant. Strict JSON only.";
   const user = JSON.stringify({
     topic,
     candidates: candidates.map((c, i) => ({ index: i, lines: c.lines }))
@@ -430,14 +387,14 @@ async function judgeCandidates(candidates, topic){
     system: buildJudgePrompt(topic),
     user,
     n: 1,
-    temperature: 0.3 // 판사는 낮게
+    temperature: 0.3
   });
   const obj = JSON.parse(outs[0]);
   if (!obj || typeof obj.best_index !== "number") throw new Error("Judge failed");
-  return obj; // { candidates:[...], best_index, ... }
+  return obj;
 }
 
-/* -------- Densify (부족할 때 1회 확장) -------- */
+/* -------- Densify (부족 시 1회 확장) -------- */
 async function densifyLines(lines, { topic, language, durationSec }) {
   const target_words = Math.round(getWPS(language) * durationSec);
   const system = "You expand scripts without fluff. Return JSON { lines: [string] } only.";
@@ -460,10 +417,89 @@ async function densifyLines(lines, { topic, language, durationSec }) {
   const obj = JSON.parse(outs[0]);
   let outLines = Array.isArray(obj?.lines) ? obj.lines : [];
   outLines = outLines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
-  return outLines.length ? outLines : lines; // 실패 시 원본 유지
+  return outLines.length ? outLines : lines;
 }
 
-/* -------- handler -------- */
+/* -------- 비주얼 요소(complete 모드) -------- */
+function generateSmartVisualElements(script, topic, style) {
+  const lines = String(script || "").split("\n").filter(Boolean);
+  const transitions = [];
+  const bRoll = [];
+  const textOverlays = [];
+  const soundEffects = [];
+
+  const transPool = {
+    meme: ["Jump cut","Zoom punch","Glitch","Speed ramp","Shake"],
+    quicktip: ["Number pop","Slide","Highlight","Circle zoom"],
+    challenge: ["Whip pan","Crash zoom","Impact frame","Flash"],
+    storytelling: ["Cross fade","Time lapse","Match cut","Reveal"],
+    productplug: ["Product reveal","Comparison split","Before/after"],
+    faceless: ["Text slam","Motion blur","Kinetic type"]
+  }[style] || ["Text slam","Motion blur","Kinetic type"];
+
+  lines.forEach((line, i) => {
+    const m = line.match(/^\[(\d+(?:\.\d+)?)\-(\d+(?:\.\d+)?)\]\s*(.*)$/);
+    if (!m) return;
+    const start = parseFloat(m[1]); const end = parseFloat(m[2]);
+    const content = m[3];
+    if (i > 0) transitions.push({ time: `${start.toFixed(1)}s`, type: transPool[i % transPool.length], description: "Pace change" });
+    if (!/\[HOOK\]|\[CTA\]/i.test(content)) {
+      bRoll.push({ timeRange: `${start.toFixed(1)}-${end.toFixed(1)}s`, content: "Relevant stock footage or UI demo" });
+    }
+    if (/\d/.test(content)) {
+      const num = content.match(/\d+%?|\$\d+/)?.[0];
+      if (num) textOverlays.push({ time: `${start.toFixed(1)}s`, text: num, style: "Giant number glow" });
+    }
+    if (/stop|never|wrong|멈춰|절대|잘못/.test(content.toLowerCase())) {
+      soundEffects.push({ time: `${start.toFixed(1)}s`, effect: "Alert/Error" });
+    }
+  });
+  return { transitions, bRoll, textOverlays, soundEffects };
+}
+
+/* -------- Refinement Question (3.5단계) -------- */
+function buildQuestionSystemPrompt(language, topic){
+  const lang = normalizeLang(language);
+  return `You ask ONE sharp refinement question to improve a short-form script.
+
+LANGUAGE: ${lang} ONLY
+RETURN: strict JSON { "question": string, "options": string[] }.
+
+RULES:
+- One question only, concise, concrete, about the user's intent or constraints.
+- Provide up to 4 short options if applicable (may be empty).
+- No meta like "in this video". No emojis.
+TOPIC: ${topic}`;
+}
+function buildQuestionUserPrompt({ baseScript, conversationHistory, keyword, style, language }) {
+  return JSON.stringify({
+    task: "ask_refinement_question",
+    topic: keyword,
+    language: normalizeLang(language),
+    style: style || "",
+    baseScript: baseScript || "",
+    conversationHistory: Array.isArray(conversationHistory) ? conversationHistory.slice(-8) : []
+  });
+}
+async function askRefinementQuestion({ text, language, baseScript, conversationHistory, keyword, style }) {
+  // 대화가 충분히 쌓였으면 종료 신호
+  if (Array.isArray(conversationHistory) && conversationHistory.length >= 3) {
+    return { question: null, options: [] };
+  }
+  const system = buildQuestionSystemPrompt(language, text);
+  const user = buildQuestionUserPrompt({ baseScript, conversationHistory, keyword: keyword || text, style, language });
+  try {
+    const outs = await callOpenAI({ system, user, n: 1, temperature: 0.6 });
+    const obj = JSON.parse(outs[0] || "{}");
+    const q = typeof obj.question === "string" ? obj.question.trim() : null;
+    const options = Array.isArray(obj.options) ? obj.options.filter(Boolean).slice(0,4) : [];
+    return { question: q || null, options };
+  } catch {
+    return { question: null, options: [] };
+  }
+}
+
+/* ---------------- handler ---------------- */
 module.exports = async (req, res) => {
   if (!setupCORS(req, res)) {
     if (req.method === "OPTIONS") return res.status(204).end();
@@ -477,16 +513,23 @@ module.exports = async (req, res) => {
   catch (err) { return res.status(err?.status || 400).json({ error: err.message || "Invalid request body" }); }
 
   const {
-    text,                 // 주제(필수)
+    text,                            // topic (필수)
     language = "Korean",
     length = 45,
     tone = "Casual",
     style = "faceless",
-    timestamps = true,    // true면 [start-end] 표시
-    maxLines = 0,         // 0이면 제한 없음
+    timestamps = true,
+    maxLines = 0,
     includeQuality = false,
-    phase,                // "question" | "final" | undefined
-    refineAnswer          // phase="final"에서 사용
+    outputType = "script",           // "script" | "complete"
+
+    // Q&A phases
+    phase,                           // "initial" | "refinement-question" | "final" | undefined
+    baseScript,                      // 초기 스크립트(문자열)
+    conversationHistory,             // 사용자가 답했던 배열
+    refinementContext,               // 최종 생성 시 반영
+    // regenerateWithEdit (원샷/기본 루트에서 사용)
+    previousScript
   } = body || {};
 
   if (!text || typeof text !== "string" || text.trim().length < 3) {
@@ -494,45 +537,140 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // === 1) Q&A 1차: 질문만 반환 ===
-    if (phase === "question") {
-      const q = await askRefinementQuestion({ text, language });
+    /* ---------- Phase: initial ---------- */
+    if (phase === "initial") {
+      const system = buildSystemPrompt(language, text);
+      const user = buildUserPrompt({ text, language, duration: length, tone, style });
+      const outs = await callOpenAI({ system, user, n: 1, temperature: 0.7 });
+      const obj = JSON.parse(outs[0]);
+      let lines = Array.isArray(obj?.lines)
+        ? obj.lines.map(x => typeof x === "string" ? x : String(x?.text || ""))
+        : [];
+      lines = lines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
+      if (maxLines > 0 && lines.length > maxLines) lines = lines.slice(0, maxLines);
+      if (!lines.length) lines = ["Write something specific and concrete."];
+
+      const durationSec = Math.max(15, Math.min(Number(length) || 45, 180));
+      const script = timestamps ? allocateDurationsByWords(lines, durationSec) : lines.join("\n");
+      return res.status(200).json({ result: script });
+    }
+
+    /* ----- Phase: refinement-question ----- */
+    if (phase === "refinement-question") {
+      const q = await askRefinementQuestion({
+        text,
+        language,
+        baseScript,
+        conversationHistory: Array.isArray(conversationHistory) ? conversationHistory : [],
+        keyword: body.keyword,
+        style
+      });
+      // { question: string|null, options: [] }
       return res.status(200).json(q);
     }
 
-    // === 2) 원샷/최종: 스크립트 생성 ===
-    const system = buildSystemPrompt(language, text);
-    const user   = buildUserPrompt({ text, language, duration: length, tone, style, refineAnswer });
+    /* ------------- Phase: final ------------- */
+    if (phase === "final") {
+      const system = buildSystemPrompt(language, text);
+      const user = buildUserPrompt({
+        text,
+        language,
+        duration: length,
+        tone,
+        style,
+        refinementContext,
+        baseScript
+      });
 
-    // 후보 5개 생성
+      const outs = await callOpenAI({ system, user, n: 5, temperature: 0.75 });
+      if (!outs.length) return res.status(500).json({ error: "Empty response" });
+
+      const candidates = outs.map(o => {
+        const obj = JSON.parse(o);
+        let lines = Array.isArray(obj?.lines)
+          ? obj.lines.map(x => typeof x === "string" ? x : String(x?.text || ""))
+          : [];
+        lines = lines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
+        if (maxLines > 0 && lines.length > maxLines) lines = lines.slice(0, maxLines);
+        if (!lines.length) lines = ["Write something specific and concrete."];
+        return { lines };
+      });
+
+      let bestIdx = 0, judgeDump = null;
+      try {
+        const judge = await judgeCandidates(candidates, text);
+        bestIdx = judge.best_index; judgeDump = judge;
+      } catch (e) {
+        console.error("[Judge Error]", e?.message || e);
+        bestIdx = 0;
+      }
+      const best = candidates[bestIdx];
+
+      const durationSec = Math.max(15, Math.min(Number(length) || 45, 180));
+      const targetWords = Math.round(getWPS(language) * durationSec);
+      const currentWords = best.lines.join(" ").trim().split(/\s+/).filter(Boolean).length;
+
+      if (durationSec >= 60 && currentWords < targetWords * 0.85) {
+        try {
+          const expanded = await densifyLines(best.lines, { topic: text, language, durationSec });
+          const newWords = expanded.join(" ").split(/\s+/).filter(Boolean).length;
+          if (newWords > currentWords) best.lines = expanded;
+        } catch (e) {
+          console.error("[Densify Error]", e?.message || e);
+        }
+      }
+
+      const script = timestamps
+        ? allocateDurationsByWords(best.lines, durationSec)
+        : best.lines.join("\n");
+
+      if (outputType === "complete") {
+        const extras = generateSmartVisualElements(script, text, style);
+        const payload = { result: { script, ...extras } };
+        if (includeQuality && judgeDump) payload.quality = judgeDump;
+        return res.status(200).json(payload);
+      } else {
+        const payload = { result: script };
+        if (includeQuality && judgeDump) payload.quality = judgeDump;
+        return res.status(200).json(payload);
+      }
+    }
+
+    /* ----------- Default: 원샷 루트 ----------- */
+    const system = buildSystemPrompt(language, text);
+    const user = buildUserPrompt({
+      text,
+      language,
+      duration: length,
+      tone,
+      style,
+      previousScript // regenerateWithEdit 대응
+    });
+
     const outs = await callOpenAI({ system, user, n: 5, temperature: 0.75 });
     if (!outs.length) return res.status(500).json({ error: "Empty response" });
 
-    // 파싱 + 최소 후처리
-    const candidates = outs.map((o) => {
+    const candidates = outs.map(o => {
       const obj = JSON.parse(o);
       let lines = Array.isArray(obj?.lines)
         ? obj.lines.map(x => typeof x === "string" ? x : String(x?.text || ""))
         : [];
       lines = lines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
       if (maxLines > 0 && lines.length > maxLines) lines = lines.slice(0, maxLines);
-      if (lines.length === 0) lines = ["Write something specific and concrete."]; // 안전망
+      if (!lines.length) lines = ["Write something specific and concrete."];
       return { lines };
     });
 
-    // 같은 모델로 자동 채점 → 최고 선택
     let bestIdx = 0, judgeDump = null;
     try {
       const judge = await judgeCandidates(candidates, text);
-      bestIdx = judge.best_index;
-      judgeDump = judge;
+      bestIdx = judge.best_index; judgeDump = judge;
     } catch (e) {
       console.error("[Judge Error]", e?.message || e);
-      bestIdx = 0; // 폴백
+      bestIdx = 0;
     }
     const best = candidates[bestIdx];
 
-    // 길이 대비 밀도 부족하면 1회 확장
     const durationSec = Math.max(15, Math.min(Number(length) || 45, 180));
     const targetWords = Math.round(getWPS(language) * durationSec);
     const currentWords = best.lines.join(" ").trim().split(/\s+/).filter(Boolean).length;
@@ -547,15 +685,20 @@ module.exports = async (req, res) => {
       }
     }
 
-    // 타임스탬프 합성
     const script = timestamps
       ? allocateDurationsByWords(best.lines, durationSec)
       : best.lines.join("\n");
 
-    // 응답
-    const payload = { result: script };
-    if (includeQuality && judgeDump) payload.quality = judgeDump;
-    return res.status(200).json(payload);
+    if (outputType === "complete") {
+      const extras = generateSmartVisualElements(script, text, style);
+      const payload = { result: { script, ...extras } };
+      if (includeQuality && judgeDump) payload.quality = judgeDump;
+      return res.status(200).json(payload);
+    } else {
+      const payload = { result: script };
+      if (includeQuality && judgeDump) payload.quality = judgeDump;
+      return res.status(200).json(payload);
+    }
 
   } catch (error) {
     const msg = String(error?.message || "Internal error");
