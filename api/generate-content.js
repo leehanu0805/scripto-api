@@ -19,7 +19,7 @@ const HARD_TIMEOUT_MS = Math.max(
   Math.min(Number(process.env.HARD_TIMEOUT_MS) || 45000, 90000)
 );
 
-/* -------- fetch polyfill (Node18에선 기본 fetch 있음) -------- */
+/* -------- fetch polyfill (Node18은 기본 fetch 존재) -------- */
 const _fetch =
   typeof fetch === "function"
     ? fetch
@@ -80,7 +80,7 @@ function normalizeLang(language) {
 function wordsArray(s){ return String(s||"").trim().split(/\s+/).filter(Boolean); }
 function sanitizeLine(s) {
   let out = String(s || "");
-  // em dash 금지 → 콜론으로 치환
+  // em dash 금지 → 콜론 치환
   out = out.replace(/—/g, ":");
   // 줄 끝 맨숫자 제거(%, 시간, 배, plain number)
   out = out.replace(
@@ -94,7 +94,7 @@ function sanitizeLine(s) {
 function getWPS(language){
   const L = String(language||"").toLowerCase();
   const isKo = L.includes("korean") || L.includes("한국") || L === "ko";
-  return isKo ? 2.3 : 2.3; // 보수적 속도
+  return isKo ? 2.3 : 2.3; // 보수값
 }
 
 // === soft-only allocator: no max cap, min slice + soft flatten ===
@@ -104,7 +104,7 @@ function allocateDurationsByWords(lines, totalSec, opts = {}) {
   const ALPHA = (() => {
     const env = Number(process.env.SLICE_ALPHA);
     if (!Number.isNaN(env) && env > 0 && env < 1) return env;
-    return opts.alpha ?? 0.82; // 0.75~0.9 사이 추천
+    return opts.alpha ?? 0.82; // 0.75~0.9 추천
   })();
 
   // 1) 단어 수 -> soft weight (words^alpha)
@@ -330,7 +330,7 @@ function buildUserPrompt({ text, language, duration, tone, style }) {
   const duration_sec = Math.max(15, Math.min(Number(duration) || 45, 180));
   const wps = getWPS(language);
   const target_words = Math.round(duration_sec * wps);
-  const lines_target_hint = Math.round(duration_sec / 6); // 대략 1줄당 5~7초 감각
+  const lines_target_hint = Math.round(duration_sec / 6); // 대략 1줄당 5~7초
 
   return JSON.stringify({
     task: "flex_script_v2_density",
@@ -441,8 +441,8 @@ module.exports = async (req, res) => {
     length = 45,
     tone = "Casual",
     style = "faceless",
-    timestamps = true,    // true면 [start-end] 붙여줌
-    maxLines = 0,         // 0이면 제한 없음(너무 길땐 옵션으로 컷)
+    timestamps = true,    // true면 [start-end] 표시
+    maxLines = 0,         // 0이면 제한 없음(너무 길면 옵션으로 컷)
     includeQuality = false
   } = body || {};
 
