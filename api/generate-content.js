@@ -145,7 +145,7 @@ async function callOpenAI({ system, user, n = 1, temperature = 0.72 }) {
   try {
     const res = await _fetch(url, {
       method: "POST",
-      headers: { "Content-Type":"application/json", "Authorization":`Bearer ${key}` },
+      headers: { "Content-Type":"application/json", "Authorization":"Bearer "+key },
       body: JSON.stringify({
         model: process.env.OPENAI_MODEL || DEFAULT_MODEL,
         temperature,
@@ -383,78 +383,95 @@ async function judgeCandidates(candidates, topic){
   return obj;
 }
 
-/* -------- Densify (부족할 때 1회 확장) -------- */
-async function densifyLines(lines, { topic, language, durationSec }) {
-  const target_words = Math.round(getWPS(language) * durationSec);
-  const system = "You expand scripts without fluff. Return JSON { lines: [string] } only.";
-  const user = JSON.stringify({
-    topic,
-    language: normalizeLang(language),
-    duration_sec: durationSec,
-    target_words,
-    current_words: lines.join(" ").trim().split(/\s+/).filter(Boolean).length,
-    lines,
-    rules: [
-      "Keep tone and style. No meta. No emojis. No em dash.",
-      "Increase total words to ~target_words ±10% by adding concise micro-steps, examples, effects.",
-      "Prefer adding new short lines over lengthening existing lines too much.",
-      "Keep numbers useful and minimal. Never end a line with a bare number."
-    ]
-  });
+/* ==========================================================
+   🔧 Anti-repeat Utilities for Refinement Questions
+   ========================================================== */
+const DIMENSIONS = [
+  "audience", "goal", "methods", "structure", "count", "order", "detail",
+  "hook", "tone", "length", "cta", "examples", "constraints", "platform",
+  "visuals", "monetization", "risks", "data", "sources", "recording"
+];
+const DIMENSION_PRIORITY = [
+  "goal", "methods", "count", "structure", "order", "detail", "cta",
+  "tone", "platform", "visuals", "constraints", "examples", "risks",
+  "data", "sources", "length", "recording", "monetization", "audience"
+];
 
-  const outs = await callOpenAI({ system, user, n: 1, temperature: 0.55 });
-  const obj = JSON.parse(outs[0]);
-  let outLines = Array.isArray(obj?.lines) ? obj.lines : [];
-  outLines = outLines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
-  return outLines.length ? outLines : lines;
+function normalize(txt){
+  return String(txt||"")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[“”‘’\-—_]+/g, " ")
+    .replace(/[^a-z0-9가-힣 ?:%]/g, "")
+    .trim();
 }
 
-/* -------- 🔥 이미 물어본 것 명시적으로 추출 -------- */
+function detectDimension(text){
+  const t = normalize(text);
+  const has = (...arr)=>arr.some(k=>t.includes(k));
+  if (has("audience","target","viewer","for who","누구를","대상","타겟")) return "audience";
+  if (has("goal","objective","purpose","목표","용도","목적","cta goal")) return "goal";
+  if (has("method","approach","technique","방식","방법","프레임")) return "methods";
+  if (has("structure","outline","flow","구성","흐름","틀")) return "structure";
+  if (has("how many","몇","count","개수","lines","points")) return "count";
+  if (has("order","sequence","priority","순서","우선")) return "order";
+  if (has("detail","depth","얼마나 자세","깊이")) return "detail";
+  if (has("hook","opening","start","오프닝","훅")) return "hook";
+  if (has("tone","vibe","style","톤","분위기","스타일")) return "tone";
+  if (has("length","duration","seconds","minutes","길이","초","분")) return "length";
+  if (has("cta","call to action","행동 유도","구독","가입")) return "cta";
+  if (has("example","case","사례","예시")) return "examples";
+  if (has("constraint","limit","제약","예산","시간 제약")) return "constraints";
+  if (has("platform","tiktok","reels","shorts","플랫폼","틱톡","릴스","쇼츠")) return "platform";
+  if (has("visual","broll","overlay","자막","비주얼","브롤")) return "visuals";
+  if (has("monetize","sale","affiliate","수익","판매","제휴")) return "monetization";
+  if (has("risk","pitfall","mistake","리스크","함정","실수")) return "risks";
+  if (has("data","metric","kpi","데이터","지표")) return "data";
+  if (has("source","reference","출처","근거")) return "sources";
+  if (has("record","mic","camera","lighting","촬영","마이크","카메라","조명")) return "recording";
+  return null;
+}
+
+const OPTION_SYNONYMS = {
+  beginners: ["beginner","novice","newbie","초보","입문"],
+  intermediate: ["mid","중급"],
+  advanced: ["expert","experienced","고급","숙련"],
+  "all levels": ["everyone","모두","전 레벨"]
+};
+function canonicalOption(opt){
+  const o = normalize(opt);
+  for (const [canon, list] of Object.entries(OPTION_SYNONYMS)){
+    if (o === canon) return canon;
+    if (list.some(s=>o===normalize(s))) return canon;
+  }
+  return o;
+}
+function dedupeOptions(opts){
+  const seen = new Set();
+  const out = [];
+  for (const x of (opts||[])){
+    const k = canonicalOption(x);
+    if (!k || k === "all levels") continue; // ban all-levels
+    if (!seen.has(k)) { seen.add(k); out.push(x); }
+  }
+  return out.slice(0,4);
+}
+
+/* -------- 🔥 이미 물어본 것 명시적으로 추출 (강화 버전) -------- */
 function extractAskedTopics(conversationHistory) {
   const topics = new Set();
-  
   (conversationHistory || []).forEach(item => {
-    if (item.role === 'assistant' && item.question) {
-      const q = item.question.toLowerCase();
-      
-      // 키워드 추출
-      if (q.includes('method') || q.includes('approach') || q.includes('way')) {
-        topics.add('which specific methods/approaches to use');
-      }
-      if (q.includes('message') || q.includes('convey') || q.includes('communicate')) {
-        topics.add('what message/theme to communicate');
-      }
-      if (q.includes('how many') || q.includes('몇')) {
-        topics.add('quantity/number of items');
-      }
-      if (q.includes('order') || q.includes('sequence') || q.includes('priorit')) {
-        topics.add('order/priority/sequence');
-      }
-      if (q.includes('audience') || q.includes('target') || q.includes('viewer')) {
-        topics.add('target audience');
-      }
-      if (q.includes('tone') || q.includes('style') || q.includes('vibe')) {
-        topics.add('tone/style/vibe');
-      }
-      if (q.includes('hook') || q.includes('opening') || q.includes('start')) {
-        topics.add('hook/opening style');
-      }
-      if (q.includes('detail') || q.includes('depth') || q.includes('깊이')) {
-        topics.add('level of detail/depth');
-      }
-      if (q.includes('structure') || q.includes('organize') || q.includes('flow')) {
-        topics.add('structure/organization/flow');
-      }
-      if (q.includes('example') || q.includes('case') || q.includes('실')) {
-        topics.add('examples/case studies');
-      }
-    }
+    const q = item?.question || item?.message || item?.text || item?.prompt || "";
+    const a = item?.answer || item?.response || item?.message || "";
+    const dimQ = detectDimension(q);
+    const dimA = detectDimension(a);
+    if (dimQ) topics.add(dimQ);
+    if (dimA) topics.add(dimA);
   });
-  
   return Array.from(topics);
 }
 
-/* -------- 🔥 명시적으로 차단하는 질문 생성 -------- */
+/* -------- 🔥 명시적으로 차단하는 질문 생성 (강화 버전) -------- */
 async function generateRefinementQuestion({ 
   baseScript, 
   conversationHistory, 
@@ -464,44 +481,35 @@ async function generateRefinementQuestion({
   tone, 
   language 
 }) {
+  // guard: too long
   if (conversationHistory && conversationHistory.length >= 8) {
     return { question: null, options: [] };
   }
 
   const isFirstQuestion = !conversationHistory || conversationHistory.length === 0;
-  const askedTopics = extractAskedTopics(conversationHistory);
-  
-  // System Prompt: 심플하게
+  const askedDims = new Set(extractAskedTopics(conversationHistory));
+  const banned = new Set(askedDims);
+  // Prevent exact same dim back-to-back: also ban the last asked dimension
+  const lastEntry = (conversationHistory||[]).slice().reverse().find(x=>x?.question || x?.message);
+  const lastDim = lastEntry ? detectDimension(lastEntry.question || lastEntry.message || "") : null;
+  if (lastDim) banned.add(lastDim);
+
+  const allowed = DIMENSIONS.filter(d => !banned.has(d));
+  const allowedList = allowed.length ? allowed : DIMENSIONS.slice(); // fallback if everything banned
+
   const system = `You are a script refinement assistant. Ask ONE strategic question to improve the video script.
-
-Return JSON: { "question": "...", "options": ["opt1", "opt2", "opt3", "opt4"] }
-
+Return strict JSON: { "question": "...", "options": ["opt1","opt2","opt3","opt4"], "dimension": "one_of_${DIMENSIONS.join("|")}" }
 Rules:
-- Keep questions under 10 words
-- Options should be 2-5 words each
-- Questions must be specific and actionable
-- If 8+ exchanges, return { "question": null, "options": [] }`;
+- Max 10 words for the question, 2–5 words per option.
+- Options must be MECE (mutually exclusive), concrete, and UNIQUE.
+- Do NOT include synonyms or duplicates like Beginners vs Novices; choose one.
+- NEVER include "All levels" as an option.
+- Pick a dimension from allowed_dimensions only. Avoid banned_dimensions.
+- The question must clearly belong to that dimension.
+- No meta language, no emojis.
+`;
 
-  let userPrompt;
-  
-  if (isFirstQuestion) {
-    // 첫 질문: 전략적으로
-    userPrompt = `This is the FIRST question about a video script.
-
-Topic: "${keyword}"
-Length: ${scriptLength} seconds
-
-Task: Ask ONE strategic question that will guide the script direction.
-
-GOOD first questions:
-- "How many main points should we cover?" (if topic has multiple approaches)
-- "What's the primary goal?" (action vs education vs inspiration)
-- "Who is this for?" (beginners vs advanced)
-- "What approach should we take?" (step-by-step vs conceptual vs story-based)
-
-Generate ONE question with 3-4 concrete options.`;
-  } else {
-    // 후속 질문
+  function buildUser(isFirst){
     const prevQA = (conversationHistory || []).map((item, i) => {
       if (item.role === 'assistant' && item.question) {
         return `Q${Math.floor(i/2) + 1}: "${item.question}"`;
@@ -511,57 +519,124 @@ Generate ONE question with 3-4 concrete options.`;
       return null;
     }).filter(Boolean).join('\n');
 
-    const forbiddenTopics = askedTopics.length > 0
-      ? `\n\n❌ DO NOT ASK ABOUT THESE (already covered):\n${askedTopics.map(t => `- ${t}`).join('\n')}`
-      : '';
-
-    userPrompt = `This is question #${Math.floor((conversationHistory?.length || 0) / 2) + 1}.
-
-Topic: "${keyword}"
-
-PREVIOUS CONVERSATION:
-${prevQA}
-${forbiddenTopics}
-
-Task: Based on what we know, ask the NEXT question that fills a DIFFERENT information gap.
-
-Examples of GOOD progressions:
-Q1: "How many methods?" → A1: "3 methods"
-Q2: "In what order?" ✅ (different dimension)
-Q2: "Which methods specifically?" ❌ (repeats Q1)
-
-Q1: "What's the main message?" → A1: "Quick tips"  
-Q2: "How detailed should each tip be?" ✅
-Q2: "What message to convey?" ❌ (repeats Q1)
-
-Q1: "Which method to focus on?" → A1: "Affiliate marketing"
-Q2: "How much time on each step?" ✅
-Q2: "What methods to highlight?" ❌ (repeats Q1)
-
-Generate ONE NEW question (different from previous) with 3-4 options.`;
-  }
-
-  try {
-    const outs = await callOpenAI({ 
-      system, 
-      user: userPrompt, 
-      n: 1, 
-      temperature: 0.7
-    });
-    const result = JSON.parse(outs[0]);
-    
-    if (!result.question || result.question === null) {
-      return { question: null, options: [] };
-    }
-
-    return {
-      question: result.question,
-      options: Array.isArray(result.options) ? result.options.slice(0, 4) : []
+    const base = {
+      topic: String(keyword||"").slice(0,200),
+      script_length_sec: scriptLength || 45,
+      style: style || "faceless",
+      tone: tone || "Casual",
+      language: normalizeLang(language),
+      allowed_dimensions: allowedList,
+      banned_dimensions: Array.from(banned),
+      previous_qa: prevQA,
+      guidance: [
+        isFirst ? "Ask a high-leverage framing question." : "Ask about a DIFFERENT dimension than before.",
+        "Options must be unique after canonicalization (e.g., Beginners vs Novices -> pick one).",
+        "Options count 3–4, no 'All levels'."
+      ]
     };
-  } catch (e) {
-    console.error("[Refinement Question Error]", e?.message || e);
-    return { question: null, options: [] };
+
+    // Slight nudge examples without audience repetition
+    const goodFirst = [
+      'How many main points should we cover?',
+      'What\'s the primary goal?',
+      'Which approach should we take?',
+      'How detailed should each tip be?'
+    ];
+
+    if (isFirst){
+      base.examples = { good_first_questions: goodFirst };
+    }
+    return JSON.stringify(base);
   }
+
+  // Try generate with validation up to 2 attempts
+  const attempts = 2;
+  let lastParsed = null;
+  for (let i=0; i<attempts; i++){
+    try {
+      const outs = await callOpenAI({ 
+        system, 
+        user: buildUser(isFirstQuestion), 
+        n: 1, 
+        temperature: 0.55 // lower variance for stability
+      });
+      const obj = JSON.parse(outs[0] || '{}');
+      lastParsed = obj;
+      let q = (obj?.question||"").trim();
+      let options = Array.isArray(obj?.options)? obj.options : [];
+      const dim = obj?.dimension || detectDimension(q);
+
+      // Validate dimension
+      const dimOk = dim && allowedList.includes(dim) && !banned.has(dim);
+
+      // Dedupe & sanitize options
+      options = dedupeOptions(options);
+      if (options.length < 3) {
+        // try to repair by adding generic but distinct placeholders per dimension
+        const fillersByDim = {
+          audience: ["Beginners","Intermediate","Advanced","Freelancers"],
+          goal: ["Action","Education","Inspiration","Case study"],
+          methods: ["Step-by-step","Checklist","Story-based","Before-after"],
+          structure: ["Hook→Steps→CTA","Problem→Fix→Proof","Myth→Facts→CTA","Pain→Solution→Result"],
+          count: ["3","4","5","7"],
+          order: ["Pain→Solution→Proof","Hook→Steps→CTA","Problem→Myth→Fix","Mistake→Fix→Result"],
+          detail: ["High-level","Medium detail","Deep dive","Micro-steps"],
+          hook: ["Problem-first","Shocking stat","Promise","Question"],
+          tone: ["Casual","Professional","Bold","Playful"],
+          length: ["30s","45s","60s","90s"],
+          cta: ["Subscribe","Download guide","Join newsletter","Try free tool"],
+          examples: ["Before/after","Mini case","User quote","Demo"],
+          constraints: ["No face-cam","Budget gear","One take","No music"],
+          platform: ["TikTok","Reels","Shorts","Cross-post"],
+          visuals: ["Text overlays","B-roll heavy","Screen capture","Minimal graphics"],
+          monetization: ["Affiliate","Lead magnet","Sponsorship","Product demo"],
+          risks: ["Clickbait","Too long","Too vague","No proof"],
+          data: ["Metric screenshot","A/B result","Benchmark","Survey"],
+          sources: ["Peer review","Official docs","Internal test","Expert quote"],
+          recording: ["Mic priority","Lighting first","Camera angle","Screen record"]
+        };
+        const fillers = fillersByDim[dim] || [];
+        options = dedupeOptions([...options, ...fillers]);
+      }
+
+      const hasDup = new Set(options.map(canonicalOption)).size !== options.length;
+      const looksAudienceRepeat = dim === 'audience' && (askedDims.has('audience') || lastDim === 'audience');
+
+      if (q && options.length >= 3 && !hasDup && dimOk && !looksAudienceRepeat) {
+        return { question: q, options };
+      }
+      // else fall-through to retry
+    } catch (e) {
+      // ignore and retry
+    }
+  }
+
+  // Deterministic fallback: pick next unused dimension by priority
+  const pick = DIMENSION_PRIORITY.find(d => !banned.has(d)) || 'goal';
+  const templates = {
+    audience: { q: "Who should we target?", o: ["Beginners","Intermediate","Advanced","Freelancers"] },
+    goal: { q: "What's the primary goal?", o: ["Action","Education","Inspiration","Case study"] },
+    methods: { q: "Which approach should we use?", o: ["Step-by-step","Checklist","Story-based","Before-after"] },
+    structure: { q: "Which structure should we follow?", o: ["Hook→Steps→CTA","Problem→Fix→Proof","Myth→Facts→CTA","Pain→Solution→Result"] },
+    count: { q: "How many key points?", o: ["3","4","5","7"] },
+    order: { q: "What order should we use?", o: ["Pain→Solution→Proof","Hook→Steps→CTA","Problem→Myth→Fix","Mistake→Fix→Result"] },
+    detail: { q: "How detailed should tips be?", o: ["High-level","Medium detail","Deep dive","Micro-steps"] },
+    hook: { q: "What hook style fits best?", o: ["Problem-first","Shocking stat","Promise","Question"] },
+    tone: { q: "What tone should we use?", o: ["Casual","Professional","Bold","Playful"] },
+    length: { q: "Target runtime?", o: ["30s","45s","60s","90s"] },
+    cta: { q: "Which CTA should we add?", o: ["Subscribe","Download guide","Join newsletter","Try free tool"] },
+    examples: { q: "What example type to show?", o: ["Before/after","Mini case","User quote","Demo"] },
+    constraints: { q: "Any constraints to respect?", o: ["No face-cam","Budget gear","One take","No music"] },
+    platform: { q: "Which platform first?", o: ["TikTok","Reels","Shorts","Cross-post"] },
+    visuals: { q: "Visual style preference?", o: ["Text overlays","B-roll heavy","Screen capture","Minimal graphics"] },
+    monetization: { q: "Monetization angle?", o: ["Affiliate","Lead magnet","Sponsorship","Product demo"] },
+    risks: { q: "What pitfall to avoid?", o: ["Clickbait","Too long","Too vague","No proof"] },
+    data: { q: "Evidence to include?", o: ["Metric screenshot","A/B result","Benchmark","Survey"] },
+    sources: { q: "Preferred source type?", o: ["Peer review","Official docs","Internal test","Expert quote"] },
+    recording: { q: "Recording priority?", o: ["Mic priority","Lighting first","Camera angle","Screen record"] }
+  };
+  const fallback = templates[pick];
+  return { question: fallback.q, options: fallback.o };
 }
 
 /* -------- Phase별 처리 로직 -------- */
@@ -605,6 +680,31 @@ async function handleRefinementQuestionPhase(body) {
   });
 
   return result;
+}
+
+async function densifyLines(lines, { topic, language, durationSec }) {
+  const target_words = Math.round(getWPS(language) * durationSec);
+  const system = "You expand scripts without fluff. Return JSON { lines: [string] } only.";
+  const user = JSON.stringify({
+    topic,
+    language: normalizeLang(language),
+    duration_sec: durationSec,
+    target_words,
+    current_words: lines.join(" ").trim().split(/\s+/).filter(Boolean).length,
+    lines,
+    rules: [
+      "Keep tone and style. No meta. No emojis. No em dash.",
+      "Increase total words to ~target_words ±10% by adding concise micro-steps, examples, effects.",
+      "Prefer adding new short lines over lengthening existing lines too much.",
+      "Keep numbers useful and minimal. Never end a line with a bare number."
+    ]
+  });
+
+  const outs = await callOpenAI({ system, user, n: 1, temperature: 0.55 });
+  const obj = JSON.parse(outs[0]);
+  let outLines = Array.isArray(obj?.lines) ? obj.lines : [];
+  outLines = outLines.map(sanitizeLine).map(s => s.trim()).filter(Boolean);
+  return outLines.length ? outLines : lines;
 }
 
 async function handleFinalPhase(body) {
