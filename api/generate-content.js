@@ -2,7 +2,7 @@
 
 /* ==========================================================
    Scripto — Flexible Script Generator + Self-Judge (≤ 1분)
-   + Step 3.5 AI Chat Refinement (심플 버전)
+   + Step 3.5 AI Chat Refinement (진짜 작동하는 버전)
    ========================================================== */
 
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -409,7 +409,52 @@ async function densifyLines(lines, { topic, language, durationSec }) {
   return outLines.length ? outLines : lines;
 }
 
-/* -------- 🔥 심플 버전: 맥락 명확히 제공 -------- */
+/* -------- 🔥 이미 물어본 것 명시적으로 추출 -------- */
+function extractAskedTopics(conversationHistory) {
+  const topics = new Set();
+  
+  (conversationHistory || []).forEach(item => {
+    if (item.role === 'assistant' && item.question) {
+      const q = item.question.toLowerCase();
+      
+      // 키워드 추출
+      if (q.includes('method') || q.includes('approach') || q.includes('way')) {
+        topics.add('which specific methods/approaches to use');
+      }
+      if (q.includes('message') || q.includes('convey') || q.includes('communicate')) {
+        topics.add('what message/theme to communicate');
+      }
+      if (q.includes('how many') || q.includes('몇')) {
+        topics.add('quantity/number of items');
+      }
+      if (q.includes('order') || q.includes('sequence') || q.includes('priorit')) {
+        topics.add('order/priority/sequence');
+      }
+      if (q.includes('audience') || q.includes('target') || q.includes('viewer')) {
+        topics.add('target audience');
+      }
+      if (q.includes('tone') || q.includes('style') || q.includes('vibe')) {
+        topics.add('tone/style/vibe');
+      }
+      if (q.includes('hook') || q.includes('opening') || q.includes('start')) {
+        topics.add('hook/opening style');
+      }
+      if (q.includes('detail') || q.includes('depth') || q.includes('깊이')) {
+        topics.add('level of detail/depth');
+      }
+      if (q.includes('structure') || q.includes('organize') || q.includes('flow')) {
+        topics.add('structure/organization/flow');
+      }
+      if (q.includes('example') || q.includes('case') || q.includes('실')) {
+        topics.add('examples/case studies');
+      }
+    }
+  });
+  
+  return Array.from(topics);
+}
+
+/* -------- 🔥 명시적으로 차단하는 질문 생성 -------- */
 async function generateRefinementQuestion({ 
   baseScript, 
   conversationHistory, 
@@ -424,8 +469,9 @@ async function generateRefinementQuestion({
   }
 
   const isFirstQuestion = !conversationHistory || conversationHistory.length === 0;
+  const askedTopics = extractAskedTopics(conversationHistory);
   
-  // 🔥 System Prompt: 심플하게
+  // System Prompt: 심플하게
   const system = `You are a script refinement assistant. Ask ONE strategic question to improve the video script.
 
 Return JSON: { "question": "...", "options": ["opt1", "opt2", "opt3", "opt4"] }
@@ -436,48 +482,63 @@ Rules:
 - Questions must be specific and actionable
 - If 8+ exchanges, return { "question": null, "options": [] }`;
 
-  // 🔥 User Prompt: 맥락 명확히
   let userPrompt;
   
   if (isFirstQuestion) {
-    // 첫 질문: 큰 범위로
+    // 첫 질문: 전략적으로
     userPrompt = `This is the FIRST question about a video script.
 
-Topic: ${keyword}
-Script length: ${scriptLength} seconds
-Style: ${style}
-Tone: ${tone}
-Language: ${language}
+Topic: "${keyword}"
+Length: ${scriptLength} seconds
 
-Task: Ask the MOST IMPORTANT big-picture question that will guide the entire script structure.
-Examples: "How many main points should we cover?", "What's the primary goal of this video?", "Who is the target audience?"
+Task: Ask ONE strategic question that will guide the script direction.
 
-Generate ONE strategic question with 3-4 concrete options.`;
+GOOD first questions:
+- "How many main points should we cover?" (if topic has multiple approaches)
+- "What's the primary goal?" (action vs education vs inspiration)
+- "Who is this for?" (beginners vs advanced)
+- "What approach should we take?" (step-by-step vs conceptual vs story-based)
+
+Generate ONE question with 3-4 concrete options.`;
   } else {
-    // 후속 질문: 이전 대화 기반
+    // 후속 질문
     const prevQA = (conversationHistory || []).map((item, i) => {
       if (item.role === 'assistant' && item.question) {
-        return `Q${Math.floor(i/2) + 1}: ${item.question}`;
-      } else if (item.role === 'user' && item.answer) {
-        return `A${Math.floor(i/2) + 1}: ${item.answer}`;
+        return `Q${Math.floor(i/2) + 1}: "${item.question}"`;
+      } else if (item.role === 'user' && (item.answer || item.message)) {
+        return `A${Math.floor(i/2) + 1}: "${item.answer || item.message}"`;
       }
       return null;
     }).filter(Boolean).join('\n');
 
-    userPrompt = `This is question #${Math.floor(conversationHistory.length / 2) + 1} in a refinement conversation.
+    const forbiddenTopics = askedTopics.length > 0
+      ? `\n\n❌ DO NOT ASK ABOUT THESE (already covered):\n${askedTopics.map(t => `- ${t}`).join('\n')}`
+      : '';
 
-Topic: ${keyword}
-Script length: ${scriptLength} seconds
+    userPrompt = `This is question #${Math.floor((conversationHistory?.length || 0) / 2) + 1}.
+
+Topic: "${keyword}"
 
 PREVIOUS CONVERSATION:
 ${prevQA}
+${forbiddenTopics}
 
-Task: Based on the previous Q&A, ask the NEXT LOGICAL question that builds on what we know.
-- DO NOT repeat what was already asked
-- Ask about a different dimension (if Q1 was about quantity, maybe Q2 is about order/priority/depth)
-- Keep progressing from strategy → structure → details
+Task: Based on what we know, ask the NEXT question that fills a DIFFERENT information gap.
 
-Generate ONE new question with 3-4 concrete options.`;
+Examples of GOOD progressions:
+Q1: "How many methods?" → A1: "3 methods"
+Q2: "In what order?" ✅ (different dimension)
+Q2: "Which methods specifically?" ❌ (repeats Q1)
+
+Q1: "What's the main message?" → A1: "Quick tips"  
+Q2: "How detailed should each tip be?" ✅
+Q2: "What message to convey?" ❌ (repeats Q1)
+
+Q1: "Which method to focus on?" → A1: "Affiliate marketing"
+Q2: "How much time on each step?" ✅
+Q2: "What methods to highlight?" ❌ (repeats Q1)
+
+Generate ONE NEW question (different from previous) with 3-4 options.`;
   }
 
   try {
@@ -485,7 +546,7 @@ Generate ONE new question with 3-4 concrete options.`;
       system, 
       user: userPrompt, 
       n: 1, 
-      temperature: 0.75
+      temperature: 0.7
     });
     const result = JSON.parse(outs[0]);
     
