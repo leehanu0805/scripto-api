@@ -4,7 +4,7 @@
    Scripto — Flexible Script Generator + Self-Judge (≤ 1분)
    + Step 3.5 AI Chat Refinement 지원
    - phase: "initial" → 초기 스크립트 생성 (간단)
-   - phase: "refinement-question" → 동적 질문 생성
+   - phase: "refinement-question" → 동적 질문 생성 (초안 선택)
    - phase: "final" → 최종 스크립트 (refinement 맥락 반영)
    - 기존: n=5 후보 → 자동 채점 → 1등 선택
    ========================================================== */
@@ -413,32 +413,54 @@ async function densifyLines(lines, { topic, language, durationSec }) {
   return outLines.length ? outLines : lines;
 }
 
-/* -------- 🆕 Step 3.5: Refinement Question 생성 -------- */
-async function generateRefinementQuestion({ baseScript, conversationHistory, keyword, style }) {
-  // 대화가 5번 이상 진행되었으면 종료
-  if (conversationHistory && conversationHistory.length >= 5) {
+/* -------- 🆕 Step 3.5: Refinement Question 생성 (초안 선택) -------- */
+async function generateRefinementQuestion({ baseScript, conversationHistory, keyword, style, scriptLength, tone, language }) {
+  // 대화가 8번 이상 진행되었으면 종료
+  if (conversationHistory && conversationHistory.length >= 8) {
     return { question: null, options: [] };
   }
 
-  const system = `You are a script refinement assistant. Ask ONE targeted question to improve the script.
+  const hasScript = baseScript && baseScript.trim().length > 0;
+  
+  const system = `You are a script refinement assistant. Ask ONE targeted question to improve the video script.
 
 RULES:
-- Ask about: tone adjustment, pacing, hook strength, clarity, audience fit, CTA placement
+- Ask about CONCRETE aspects: pacing, hook strength, number of examples, audience specificity, tone adjustment
 - Return JSON: { "question": "...", "options": ["option1", "option2", "option3"] }
-- Options should be 2-4 short choices (3-6 words each)
-- If conversation history shows 5+ exchanges, return { "question": null, "options": [] } to end
-- Keep questions SHORT and SPECIFIC`;
+- Options should be 2-4 short choices (2-5 words each)
+- Questions should be SPECIFIC and ACTIONABLE
+- If conversation shows 8+ exchanges, return { "question": null, "options": [] } to end
+- Keep questions SHORT (under 15 words)
+
+GOOD QUESTION EXAMPLES:
+- "How many main points should the script cover?"
+- "What hook style works best for your audience?"
+- "Should the tone be more formal or casual?"
+- "How much detail on each step?"
+
+BAD QUESTIONS (avoid these):
+- Vague: "What do you think about the script?"
+- Too broad: "How can we make this better?"
+- Meta: "Do you like this approach?"`;
+
+  const scriptContext = hasScript 
+    ? `CURRENT SCRIPT (first 300 chars):\n${baseScript.substring(0, 300)}\n\n`
+    : "";
 
   const user = JSON.stringify({
-    keyword,
-    style,
-    baseScript: baseScript?.substring(0, 500) || "",
+    keyword: keyword || "video topic",
+    style: style || "general",
+    scriptLength: scriptLength || 45,
+    tone: tone || "casual",
+    language: language || "English",
+    hasExistingScript: hasScript,
     conversationHistory: conversationHistory || [],
-    task: "Generate ONE refinement question with 2-4 options"
+    scriptPreview: hasScript ? baseScript.substring(0, 300) : null,
+    task: "Generate ONE specific, actionable refinement question with 2-4 options"
   });
 
   try {
-    const outs = await callOpenAI({ system, user, n: 1, temperature: 0.65 });
+    const outs = await callOpenAI({ system, user, n: 1, temperature: 0.7 });
     const result = JSON.parse(outs[0]);
     
     // 질문이 없거나 대화가 충분히 진행되었으면 종료
@@ -478,13 +500,24 @@ async function handleInitialPhase({ text, language, duration, tone, style }) {
 }
 
 async function handleRefinementQuestionPhase(body) {
-  const { baseScript, conversationHistory, keyword, style } = body;
+  const { 
+    baseScript, 
+    conversationHistory, 
+    keyword, 
+    style,
+    scriptLength,
+    tone,
+    language 
+  } = body;
   
   const result = await generateRefinementQuestion({
     baseScript,
     conversationHistory,
     keyword,
-    style
+    style,
+    scriptLength,
+    tone,
+    language
   });
 
   return result;
@@ -493,7 +526,7 @@ async function handleRefinementQuestionPhase(body) {
 async function handleFinalPhase(body) {
   const {
     text,
-    language = "Korean",
+    language = "English",
     length = 45,
     tone = "Casual",
     style = "faceless",
@@ -508,7 +541,7 @@ async function handleFinalPhase(body) {
   // refinementContext가 있으면 system prompt에 반영
   const systemBase = buildSystemPrompt(language, text);
   const refinementNote = refinementContext 
-    ? `\n\nUSER PREFERENCES from chat: ${refinementContext}\nIncorporate these preferences naturally into the script.`
+    ? `\n\nUSER PREFERENCES from refinement chat:\n${refinementContext}\n\nIncorporate these preferences naturally into the script structure and content.`
     : "";
   const system = systemBase + refinementNote;
 
@@ -619,7 +652,7 @@ module.exports = async (req, res) => {
       return res.status(200).json(result);
     }
 
-    if (phase === "refinement-question") {
+    if (phase === "refinement-question" || phase === "refinement-question-only") {
       const result = await handleRefinementQuestionPhase(body);
       return res.status(200).json(result);
     }
