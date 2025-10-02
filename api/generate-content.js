@@ -2,10 +2,7 @@
 
 /* ==========================================================
    Scripto — Flexible Script Generator + Self-Judge (≤ 1분)
-   + Step 3.5 AI Chat Refinement 지원 (질문 품질 강화)
-   - phase: "initial" → 초기 스크립트 생성 (간단)
-   - phase: "refinement-question" → 동적 질문 생성 (맥락 반영)
-   - phase: "final" → 최종 스크립트 (refinement 맥락 반영)
+   + Step 3.5 AI Chat Refinement (심플 버전)
    ========================================================== */
 
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -412,7 +409,7 @@ async function densifyLines(lines, { topic, language, durationSec }) {
   return outLines.length ? outLines : lines;
 }
 
-/* -------- 🔥 NEW: Context-Aware Refinement Question 생성 -------- */
+/* -------- 🔥 심플 버전: 맥락 명확히 제공 -------- */
 async function generateRefinementQuestion({ 
   baseScript, 
   conversationHistory, 
@@ -422,123 +419,78 @@ async function generateRefinementQuestion({
   tone, 
   language 
 }) {
-  // 8번 이상 대화 시 종료
   if (conversationHistory && conversationHistory.length >= 8) {
     return { question: null, options: [] };
   }
 
-  const hasScript = baseScript && baseScript.trim().length > 0;
+  const isFirstQuestion = !conversationHistory || conversationHistory.length === 0;
   
-  // 🔥 이전 질문 패턴 분석
-  const previousQuestions = (conversationHistory || [])
-    .filter(item => item.role === 'assistant' && item.question)
-    .map(item => item.question.toLowerCase());
+  // 🔥 System Prompt: 심플하게
+  const system = `You are a script refinement assistant. Ask ONE strategic question to improve the video script.
+
+Return JSON: { "question": "...", "options": ["opt1", "opt2", "opt3", "opt4"] }
+
+Rules:
+- Keep questions under 10 words
+- Options should be 2-5 words each
+- Questions must be specific and actionable
+- If 8+ exchanges, return { "question": null, "options": [] }`;
+
+  // 🔥 User Prompt: 맥락 명확히
+  let userPrompt;
   
-  const askedTopics = new Set();
-  previousQuestions.forEach(q => {
-    if (q.includes('example') || q.includes('case')) askedTopics.add('examples');
-    if (q.includes('hook') || q.includes('opening')) askedTopics.add('hook');
-    if (q.includes('tone') || q.includes('formal') || q.includes('casual')) askedTopics.add('tone');
-    if (q.includes('pace') || q.includes('speed') || q.includes('timing')) askedTopics.add('pacing');
-    if (q.includes('detail') || q.includes('depth')) askedTopics.add('detail');
-    if (q.includes('audience') || q.includes('viewer') || q.includes('target')) askedTopics.add('audience');
-    if (q.includes('structure') || q.includes('flow')) askedTopics.add('structure');
-    if (q.includes('cta') || q.includes('call to action') || q.includes('ending')) askedTopics.add('cta');
-  });
+  if (isFirstQuestion) {
+    // 첫 질문: 큰 범위로
+    userPrompt = `This is the FIRST question about a video script.
 
-  // 🔥 이전 답변 맥락 추출
-  const userAnswers = (conversationHistory || [])
-    .filter(item => item.role === 'user')
-    .map(item => item.answer || item.message || '');
-  
-  const system = `You are an expert script refinement coach. Ask ONE strategic question to improve the video script.
+Topic: ${keyword}
+Script length: ${scriptLength} seconds
+Style: ${style}
+Tone: ${tone}
+Language: ${language}
 
-CRITICAL RULES:
-1. ANALYZE conversation history to AVOID duplicate questions
-2. Ask progressively DEEPER questions as conversation continues
-3. Questions must be SPECIFIC and ACTIONABLE
-4. Consider user's previous answers to ask contextual follow-ups
-5. Return JSON: { "question": "...", "options": ["opt1", "opt2", "opt3", "opt4"] }
-6. Keep questions under 12 words
-7. If 8+ exchanges, return { "question": null, "options": [] }
+Task: Ask the MOST IMPORTANT big-picture question that will guide the entire script structure.
+Examples: "How many main points should we cover?", "What's the primary goal of this video?", "Who is the target audience?"
 
-QUESTION PROGRESSION STRATEGY (adapt based on history):
-- Round 1-2: Foundation (hook style, main focus, audience clarity)
-- Round 3-4: Structure (pacing, transition style, emphasis points)
-- Round 5-6: Refinement (tone nuance, specific moments, CTA strategy)
-- Round 7-8: Polish (final adjustments, specific line improvements)
+Generate ONE strategic question with 3-4 concrete options.`;
+  } else {
+    // 후속 질문: 이전 대화 기반
+    const prevQA = (conversationHistory || []).map((item, i) => {
+      if (item.role === 'assistant' && item.question) {
+        return `Q${Math.floor(i/2) + 1}: ${item.question}`;
+      } else if (item.role === 'user' && item.answer) {
+        return `A${Math.floor(i/2) + 1}: ${item.answer}`;
+      }
+      return null;
+    }).filter(Boolean).join('\n');
 
-PREVIOUS TOPICS TO AVOID:
-${Array.from(askedTopics).join(', ') || 'none yet'}
+    userPrompt = `This is question #${Math.floor(conversationHistory.length / 2) + 1} in a refinement conversation.
 
-GOOD QUESTION PATTERNS:
-- "Should the hook use a question or bold claim?"
-- "Where should the main proof point appear?"
-- "How explicit should the CTA be?"
-- "What emotion should the opening evoke?"
-- "Should transitions be abrupt or smooth?"
-- "Which aspect needs most screen time?"
-- "How technical should the explanation be?"
+Topic: ${keyword}
+Script length: ${scriptLength} seconds
 
-BAD QUESTIONS (NEVER ask):
-- "How many examples?" (too vague/repetitive)
-- "What do you think?" (no clear direction)
-- Generic counts without context
-- Questions already asked in different words`;
+PREVIOUS CONVERSATION:
+${prevQA}
 
-  const scriptPreview = hasScript ? baseScript.substring(0, 400) : null;
-  
-  const user = JSON.stringify({
-    keyword: keyword || "video topic",
-    style: style || "general",
-    scriptLength: scriptLength || 45,
-    tone: tone || "casual",
-    language: language || "English",
-    hasExistingScript: hasScript,
-    scriptPreview,
-    conversationHistory: conversationHistory || [],
-    conversationRound: Math.floor(conversationHistory?.length / 2) + 1,
-    previousTopicsAsked: Array.from(askedTopics),
-    userAnswersSummary: userAnswers.slice(-3).join(' | '),
-    task: "Generate ONE highly specific question that advances the refinement in a meaningful way"
-  });
+Task: Based on the previous Q&A, ask the NEXT LOGICAL question that builds on what we know.
+- DO NOT repeat what was already asked
+- Ask about a different dimension (if Q1 was about quantity, maybe Q2 is about order/priority/depth)
+- Keep progressing from strategy → structure → details
+
+Generate ONE new question with 3-4 concrete options.`;
+  }
 
   try {
     const outs = await callOpenAI({ 
       system, 
-      user, 
+      user: userPrompt, 
       n: 1, 
-      temperature: 0.8  // 높은 creativity로 다양한 질문 생성
+      temperature: 0.75
     });
     const result = JSON.parse(outs[0]);
     
     if (!result.question || result.question === null) {
       return { question: null, options: [] };
-    }
-
-    // 🔥 중복 질문 필터 (유사도 체크)
-    const newQ = result.question.toLowerCase();
-    const isDuplicate = previousQuestions.some(oldQ => {
-      const overlap = newQ.split(' ').filter(w => oldQ.includes(w)).length;
-      return overlap > 4; // 4단어 이상 겹치면 중복으로 판단
-    });
-
-    if (isDuplicate && conversationHistory.length < 6) {
-      // 중복이면 재시도 (최대 1회)
-      console.warn('[Refinement] Duplicate question detected, retrying...');
-      const retry = await callOpenAI({ 
-        system: system + '\n\nCRITICAL: Previous attempt was too similar to past questions. Ask something COMPLETELY different.', 
-        user, 
-        n: 1, 
-        temperature: 0.95 
-      });
-      const retryResult = JSON.parse(retry[0]);
-      if (retryResult.question) {
-        return {
-          question: retryResult.question,
-          options: Array.isArray(retryResult.options) ? retryResult.options.slice(0, 4) : []
-        };
-      }
     }
 
     return {
@@ -553,7 +505,6 @@ BAD QUESTIONS (NEVER ask):
 
 /* -------- Phase별 처리 로직 -------- */
 async function handleInitialPhase({ text, language, duration, tone, style }) {
-  // 초기 스크립트 1개만 빠르게 생성 (n=1, 채점 없음)
   const system = buildSystemPrompt(language, text);
   const user = buildUserPrompt({ text, language, duration, tone, style });
 
@@ -568,7 +519,6 @@ async function handleInitialPhase({ text, language, duration, tone, style }) {
   
   if (lines.length === 0) lines = ["Write something specific and concrete."];
 
-  // 타임스탬프 없이 리턴
   return { result: lines.join("\n") };
 }
 
@@ -611,7 +561,6 @@ async function handleFinalPhase(body) {
     outputType = "script"
   } = body;
 
-  // refinementContext가 있으면 system prompt에 반영
   const systemBase = buildSystemPrompt(language, text);
   const refinementNote = refinementContext 
     ? `\n\nUSER PREFERENCES from refinement chat:\n${refinementContext}\n\nIncorporate these preferences naturally into the script structure and content.`
@@ -620,7 +569,6 @@ async function handleFinalPhase(body) {
 
   const user = buildUserPrompt({ text, language, duration: length, tone, style });
 
-  // 후보 5개 생성
   const outs = await callOpenAI({ system, user, n: 5, temperature: 0.75 });
   if (!outs.length) throw new Error("Empty response");
 
@@ -635,7 +583,6 @@ async function handleFinalPhase(body) {
     return { lines };
   });
 
-  // 자동 채점 → 최고 선택
   let bestIdx = 0, judgeDump = null;
   try {
     const judge = await judgeCandidates(candidates, text);
@@ -647,7 +594,6 @@ async function handleFinalPhase(body) {
   }
   const best = candidates[bestIdx];
 
-  // 밀도 체크 & densify
   const durationSec = Math.max(15, Math.min(Number(length) || 45, 180));
   const targetWords = Math.round(getWPS(language) * durationSec);
   const currentWords = best.lines.join(" ").trim().split(/\s+/).filter(Boolean).length;
@@ -662,7 +608,6 @@ async function handleFinalPhase(body) {
     }
   }
 
-  // Complete package 요청 시 추가 데이터 생성 (간단 버전)
   let result;
   if (outputType === "complete") {
     const scriptText = timestamps
@@ -715,7 +660,6 @@ module.exports = async (req, res) => {
 
   const { text, phase } = body || {};
 
-  // Phase별 분기
   try {
     if (phase === "initial") {
       if (!text || typeof text !== "string" || text.trim().length < 3) {
@@ -738,7 +682,6 @@ module.exports = async (req, res) => {
       return res.status(200).json(result);
     }
 
-    // phase 없으면 기존 로직 (backward compatibility)
     if (!text || typeof text !== "string" || text.trim().length < 3) {
       return res.status(400).json({ error: "`text` is required (≥ 3 chars)" });
     }
