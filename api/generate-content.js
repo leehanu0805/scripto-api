@@ -2,11 +2,10 @@
 
 /* ==========================================================
    Scripto — Flexible Script Generator + Self-Judge (≤ 1분)
-   + Step 3.5 AI Chat Refinement 지원
+   + Step 3.5 AI Chat Refinement 지원 (질문 품질 강화)
    - phase: "initial" → 초기 스크립트 생성 (간단)
-   - phase: "refinement-question" → 동적 질문 생성 (초안 선택)
+   - phase: "refinement-question" → 동적 질문 생성 (맥락 반영)
    - phase: "final" → 최종 스크립트 (refinement 맥락 반영)
-   - 기존: n=5 후보 → 자동 채점 → 1등 선택
    ========================================================== */
 
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -413,40 +412,82 @@ async function densifyLines(lines, { topic, language, durationSec }) {
   return outLines.length ? outLines : lines;
 }
 
-/* -------- 🆕 Step 3.5: Refinement Question 생성 (초안 선택) -------- */
-async function generateRefinementQuestion({ baseScript, conversationHistory, keyword, style, scriptLength, tone, language }) {
-  // 대화가 8번 이상 진행되었으면 종료
+/* -------- 🔥 NEW: Context-Aware Refinement Question 생성 -------- */
+async function generateRefinementQuestion({ 
+  baseScript, 
+  conversationHistory, 
+  keyword, 
+  style, 
+  scriptLength, 
+  tone, 
+  language 
+}) {
+  // 8번 이상 대화 시 종료
   if (conversationHistory && conversationHistory.length >= 8) {
     return { question: null, options: [] };
   }
 
   const hasScript = baseScript && baseScript.trim().length > 0;
   
-  const system = `You are a script refinement assistant. Ask ONE targeted question to improve the video script.
+  // 🔥 이전 질문 패턴 분석
+  const previousQuestions = (conversationHistory || [])
+    .filter(item => item.role === 'assistant' && item.question)
+    .map(item => item.question.toLowerCase());
+  
+  const askedTopics = new Set();
+  previousQuestions.forEach(q => {
+    if (q.includes('example') || q.includes('case')) askedTopics.add('examples');
+    if (q.includes('hook') || q.includes('opening')) askedTopics.add('hook');
+    if (q.includes('tone') || q.includes('formal') || q.includes('casual')) askedTopics.add('tone');
+    if (q.includes('pace') || q.includes('speed') || q.includes('timing')) askedTopics.add('pacing');
+    if (q.includes('detail') || q.includes('depth')) askedTopics.add('detail');
+    if (q.includes('audience') || q.includes('viewer') || q.includes('target')) askedTopics.add('audience');
+    if (q.includes('structure') || q.includes('flow')) askedTopics.add('structure');
+    if (q.includes('cta') || q.includes('call to action') || q.includes('ending')) askedTopics.add('cta');
+  });
 
-RULES:
-- Ask about CONCRETE aspects: pacing, hook strength, number of examples, audience specificity, tone adjustment
-- Return JSON: { "question": "...", "options": ["option1", "option2", "option3"] }
-- Options should be 2-4 short choices (2-5 words each)
-- Questions should be SPECIFIC and ACTIONABLE
-- If conversation shows 8+ exchanges, return { "question": null, "options": [] } to end
-- Keep questions SHORT (under 15 words)
+  // 🔥 이전 답변 맥락 추출
+  const userAnswers = (conversationHistory || [])
+    .filter(item => item.role === 'user')
+    .map(item => item.answer || item.message || '');
+  
+  const system = `You are an expert script refinement coach. Ask ONE strategic question to improve the video script.
 
-GOOD QUESTION EXAMPLES:
-- "How many main points should the script cover?"
-- "What hook style works best for your audience?"
-- "Should the tone be more formal or casual?"
-- "How much detail on each step?"
+CRITICAL RULES:
+1. ANALYZE conversation history to AVOID duplicate questions
+2. Ask progressively DEEPER questions as conversation continues
+3. Questions must be SPECIFIC and ACTIONABLE
+4. Consider user's previous answers to ask contextual follow-ups
+5. Return JSON: { "question": "...", "options": ["opt1", "opt2", "opt3", "opt4"] }
+6. Keep questions under 12 words
+7. If 8+ exchanges, return { "question": null, "options": [] }
 
-BAD QUESTIONS (avoid these):
-- Vague: "What do you think about the script?"
-- Too broad: "How can we make this better?"
-- Meta: "Do you like this approach?"`;
+QUESTION PROGRESSION STRATEGY (adapt based on history):
+- Round 1-2: Foundation (hook style, main focus, audience clarity)
+- Round 3-4: Structure (pacing, transition style, emphasis points)
+- Round 5-6: Refinement (tone nuance, specific moments, CTA strategy)
+- Round 7-8: Polish (final adjustments, specific line improvements)
 
-  const scriptContext = hasScript 
-    ? `CURRENT SCRIPT (first 300 chars):\n${baseScript.substring(0, 300)}\n\n`
-    : "";
+PREVIOUS TOPICS TO AVOID:
+${Array.from(askedTopics).join(', ') || 'none yet'}
 
+GOOD QUESTION PATTERNS:
+- "Should the hook use a question or bold claim?"
+- "Where should the main proof point appear?"
+- "How explicit should the CTA be?"
+- "What emotion should the opening evoke?"
+- "Should transitions be abrupt or smooth?"
+- "Which aspect needs most screen time?"
+- "How technical should the explanation be?"
+
+BAD QUESTIONS (NEVER ask):
+- "How many examples?" (too vague/repetitive)
+- "What do you think?" (no clear direction)
+- Generic counts without context
+- Questions already asked in different words`;
+
+  const scriptPreview = hasScript ? baseScript.substring(0, 400) : null;
+  
   const user = JSON.stringify({
     keyword: keyword || "video topic",
     style: style || "general",
@@ -454,18 +495,50 @@ BAD QUESTIONS (avoid these):
     tone: tone || "casual",
     language: language || "English",
     hasExistingScript: hasScript,
+    scriptPreview,
     conversationHistory: conversationHistory || [],
-    scriptPreview: hasScript ? baseScript.substring(0, 300) : null,
-    task: "Generate ONE specific, actionable refinement question with 2-4 options"
+    conversationRound: Math.floor(conversationHistory?.length / 2) + 1,
+    previousTopicsAsked: Array.from(askedTopics),
+    userAnswersSummary: userAnswers.slice(-3).join(' | '),
+    task: "Generate ONE highly specific question that advances the refinement in a meaningful way"
   });
 
   try {
-    const outs = await callOpenAI({ system, user, n: 1, temperature: 0.7 });
+    const outs = await callOpenAI({ 
+      system, 
+      user, 
+      n: 1, 
+      temperature: 0.8  // 높은 creativity로 다양한 질문 생성
+    });
     const result = JSON.parse(outs[0]);
     
-    // 질문이 없거나 대화가 충분히 진행되었으면 종료
     if (!result.question || result.question === null) {
       return { question: null, options: [] };
+    }
+
+    // 🔥 중복 질문 필터 (유사도 체크)
+    const newQ = result.question.toLowerCase();
+    const isDuplicate = previousQuestions.some(oldQ => {
+      const overlap = newQ.split(' ').filter(w => oldQ.includes(w)).length;
+      return overlap > 4; // 4단어 이상 겹치면 중복으로 판단
+    });
+
+    if (isDuplicate && conversationHistory.length < 6) {
+      // 중복이면 재시도 (최대 1회)
+      console.warn('[Refinement] Duplicate question detected, retrying...');
+      const retry = await callOpenAI({ 
+        system: system + '\n\nCRITICAL: Previous attempt was too similar to past questions. Ask something COMPLETELY different.', 
+        user, 
+        n: 1, 
+        temperature: 0.95 
+      });
+      const retryResult = JSON.parse(retry[0]);
+      if (retryResult.question) {
+        return {
+          question: retryResult.question,
+          options: Array.isArray(retryResult.options) ? retryResult.options.slice(0, 4) : []
+        };
+      }
     }
 
     return {
@@ -478,7 +551,7 @@ BAD QUESTIONS (avoid these):
   }
 }
 
-/* -------- 🆕 Phase별 처리 로직 -------- */
+/* -------- Phase별 처리 로직 -------- */
 async function handleInitialPhase({ text, language, duration, tone, style }) {
   // 초기 스크립트 1개만 빠르게 생성 (n=1, 채점 없음)
   const system = buildSystemPrompt(language, text);
