@@ -1,8 +1,7 @@
 "use strict";
 
 /* ==========================================================
-   Scripto — Flexible Script Generator + Self-Judge (≤ 1분)
-   + Step 3.5 AI Chat Refinement (진짜 작동하는 버전)
+   Scripto — Complete Package with REAL AI Generation
    ========================================================== */
 
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -126,15 +125,22 @@ function allocateDurationsByWords(lines, totalSec, opts = {}) {
   }
 
   let t = 0;
-  return lines.map((line, i) => {
-    const start = t; t += slices[i];
+  const timestamped = lines.map((line, i) => {
+    const start = t; 
+    t += slices[i];
     const end = (i === lines.length - 1) ? dur : t;
-    return `[${start.toFixed(1)}-${end.toFixed(1)}] ${line}`;
-  }).join("\n");
+    return {
+      start: parseFloat(start.toFixed(1)),
+      end: parseFloat(end.toFixed(1)),
+      text: line
+    };
+  });
+
+  return timestamped;
 }
 
 /* -------- OpenAI 공통 호출 -------- */
-async function callOpenAI({ system, user, n = 1, temperature = 0.72 }) {
+async function callOpenAI({ system, user, n = 1, temperature = 0.72, maxTokens = 1400 }) {
   const url = `${(process.env.OPENAI_BASE_URL || "https://api.openai.com").replace(/\/+$/,"")}/v1/chat/completions`;
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error("Missing OPENAI_API_KEY");
@@ -151,7 +157,7 @@ async function callOpenAI({ system, user, n = 1, temperature = 0.72 }) {
         temperature,
         top_p: 0.92,
         n,
-        max_tokens: 1400,
+        max_tokens: maxTokens,
         presence_penalty: 0.1,
         frequency_penalty: 0.2,
         response_format: { type: "json_object" },
@@ -384,8 +390,418 @@ async function judgeCandidates(candidates, topic){
 }
 
 /* ==========================================================
-   🔧 Anti-repeat Utilities for Refinement Questions
+   🔧 COMPLETE PACKAGE AI GENERATION
    ========================================================== */
+
+/* -------- Script Structure Analysis -------- */
+function analyzeScriptStructure(timestampedLines, { style, tone, duration }) {
+  // Parse timestamped script
+  const lines = timestampedLines.map(item => ({
+    start: item.start,
+    end: item.end,
+    text: item.text,
+    duration: item.end - item.start,
+    wordCount: item.text.split(/\s+/).filter(Boolean).length
+  }));
+
+  const totalDuration = duration;
+  const lineCount = lines.length;
+
+  // Identify key moments
+  const hook = lines[0]; // First line is always hook
+  const conclusion = lines[lines.length - 1]; // Last line
+  const midPoints = [];
+  
+  // Find transition points (significant pauses or topic shifts)
+  const transitionPoints = [];
+  lines.forEach((line, i) => {
+    if (i === 0 || i === lineCount - 1) return;
+    
+    // Detect transition indicators
+    const hasTransitionWords = /\b(now|next|but|however|then|so|therefore|first|second|finally)\b/i.test(line.text);
+    const isLongLine = line.wordCount > 12;
+    const prevShort = i > 0 && lines[i-1].wordCount < 6;
+    
+    if (hasTransitionWords || (isLongLine && prevShort)) {
+      transitionPoints.push({ index: i, time: line.start, line });
+    }
+    
+    // Mid-point emphasis
+    if (Math.abs(line.start - totalDuration / 2) < 2) {
+      midPoints.push({ index: i, time: line.start, line });
+    }
+  });
+
+  // Identify emphasis points (questions, numbers, strong verbs)
+  const emphasisPoints = [];
+  lines.forEach((line, i) => {
+    const hasQuestion = line.text.includes('?');
+    const hasNumber = /\d+/.test(line.text);
+    const hasStrongVerb = /\b(boost|increase|double|triple|improve|eliminate|fix|solve)\b/i.test(line.text);
+    
+    if (hasQuestion || hasNumber || hasStrongVerb) {
+      emphasisPoints.push({ index: i, time: line.start, line, hasQuestion, hasNumber, hasStrongVerb });
+    }
+  });
+
+  // Pace analysis
+  const avgLineDuration = totalDuration / lineCount;
+  const fastSections = lines.filter(l => l.duration < avgLineDuration * 0.7).map((l, i) => ({ index: lines.indexOf(l), time: l.start }));
+  const slowSections = lines.filter(l => l.duration > avgLineDuration * 1.3).map((l, i) => ({ index: lines.indexOf(l), time: l.start }));
+
+  return {
+    lines,
+    totalDuration,
+    lineCount,
+    hook,
+    conclusion,
+    transitionPoints,
+    midPoints,
+    emphasisPoints,
+    fastSections,
+    slowSections,
+    avgLineDuration,
+    // Style characteristics
+    isMeme: style === 'meme',
+    isStorytelling: style === 'storytelling',
+    isQuickTip: style === 'quicktip',
+    isFaceless: style === 'faceless',
+    // Density for element generation
+    density: totalDuration < 45 ? 'minimal' : totalDuration < 90 ? 'moderate' : 'rich'
+  };
+}
+
+/* -------- Generate Transitions -------- */
+async function generateTransitions(analysis, { style, tone }) {
+  const { lines, totalDuration, transitionPoints, midPoints, isMeme, isStorytelling, density } = analysis;
+  
+  // Determine transition count based on duration and style
+  let targetCount;
+  if (density === 'minimal') {
+    targetCount = isMeme ? 5 : 3;
+  } else if (density === 'moderate') {
+    targetCount = isMeme ? 8 : 5;
+  } else {
+    targetCount = isMeme ? 12 : 7;
+  }
+
+  const system = `You are a video editing expert specializing in short-form content transitions.
+Generate transitions that enhance pacing and maintain viewer engagement.
+
+RETURN JSON:
+{
+  "transitions": [
+    {"time": "0.0s", "type": "Fade In", "description": "...", "rationale": "..."},
+    ...
+  ]
+}
+
+RULES:
+- time format: "X.Xs" where X.X is the timestamp
+- type: Choose from Fade In, Fade Out, Quick Cut, Jump Cut, Zoom In, Zoom Out, Slide, Wipe, Glitch, Flash
+- description: 1 sentence explaining what happens visually
+- rationale: 1 sentence explaining why this transition fits here
+- Opening MUST be at 0.0s
+- Closing transition should be near totalDuration
+- Spacing should feel natural, not mechanical`;
+
+  const user = JSON.stringify({
+    style,
+    tone,
+    totalDuration,
+    targetCount,
+    scriptStructure: {
+      lineCount: lines.length,
+      hook: lines[0].text,
+      conclusion: lines[lines.length - 1].text,
+      transitionPoints: transitionPoints.map(tp => ({ time: tp.time, text: tp.line.text })),
+      midPoints: midPoints.map(mp => ({ time: mp.time, text: mp.line.text }))
+    },
+    styleGuidance: isMeme 
+      ? "Meme style: rapid cuts, glitch effects, energetic pacing"
+      : isStorytelling
+      ? "Storytelling: smooth fades, cinematic wipes, emotional pacing"
+      : "Balanced: mix of cuts and fades, professional pacing"
+  });
+
+  try {
+    const outs = await callOpenAI({ system, user, n: 1, temperature: 0.65, maxTokens: 2000 });
+    const result = JSON.parse(outs[0]);
+    return result.transitions || [];
+  } catch (e) {
+    console.error('[Transitions Error]', e.message);
+    // Fallback: basic transitions
+    return [
+      { time: "0.0s", type: "Fade In", description: "Opening fade", rationale: "Standard opening" },
+      { time: `${(totalDuration / 2).toFixed(1)}s`, type: "Quick Cut", description: "Mid-point cut", rationale: "Maintain energy" },
+      { time: `${(totalDuration - 1).toFixed(1)}s`, type: "Fade Out", description: "Closing fade", rationale: "Standard closing" }
+    ];
+  }
+}
+
+/* -------- Generate B-Roll -------- */
+async function generateBRoll(analysis, { style, tone, keyword }) {
+  const { lines, totalDuration, emphasisPoints, density } = analysis;
+
+  // Determine B-roll count
+  let targetCount;
+  if (density === 'minimal') targetCount = 2;
+  else if (density === 'moderate') targetCount = 4;
+  else targetCount = 6;
+
+  const system = `You are a video B-roll specialist for short-form content.
+Generate B-roll suggestions that visually support the script narrative.
+
+RETURN JSON:
+{
+  "bRoll": [
+    {"timeRange": "0.0-5.5s", "content": "...", "purpose": "..."},
+    ...
+  ]
+}
+
+RULES:
+- timeRange format: "X.X-Y.Ys" where X.X is start, Y.Y is end
+- content: Describe specific visual footage needed (3-8 words)
+- purpose: Why this B-roll enhances the message (1 sentence)
+- Cover key moments, emphasis points, and demonstrations
+- B-roll should NOT overlap excessively (some overlap OK)
+- Be concrete: "Close-up of hands typing code" not "Generic workspace"`;
+
+  const user = JSON.stringify({
+    topic: keyword,
+    style,
+    tone,
+    totalDuration,
+    targetCount,
+    scriptLines: lines.map(l => ({ time: l.start, text: l.text })),
+    emphasisPoints: emphasisPoints.map(ep => ({ time: ep.time, text: ep.line.text }))
+  });
+
+  try {
+    const outs = await callOpenAI({ system, user, n: 1, temperature: 0.68, maxTokens: 2000 });
+    const result = JSON.parse(outs[0]);
+    return result.bRoll || [];
+  } catch (e) {
+    console.error('[B-Roll Error]', e.message);
+    // Fallback
+    const third = totalDuration / 3;
+    return [
+      { timeRange: `0.0-${third.toFixed(1)}s`, content: "Opening visual hook", purpose: "Grab attention immediately" },
+      { timeRange: `${third.toFixed(1)}-${(third * 2).toFixed(1)}s`, content: "Main content demonstration", purpose: "Show key concept" },
+      { timeRange: `${(third * 2).toFixed(1)}-${totalDuration.toFixed(1)}s`, content: "Result or outcome visuals", purpose: "Reinforce message" }
+    ];
+  }
+}
+
+/* -------- Generate Text Overlays -------- */
+async function generateTextOverlays(analysis, { style }) {
+  const { lines, totalDuration, emphasisPoints, hook, density } = analysis;
+
+  let targetCount;
+  if (density === 'minimal') targetCount = 3;
+  else if (density === 'moderate') targetCount = 5;
+  else targetCount = 8;
+
+  const system = `You are a text overlay designer for short-form videos.
+Generate on-screen text that reinforces key points without cluttering.
+
+RETURN JSON:
+{
+  "textOverlays": [
+    {"time": "0.5s", "text": "...", "style": "...", "purpose": "..."},
+    ...
+  ]
+}
+
+RULES:
+- time format: "X.Xs"
+- text: 2-6 words maximum, punchy and clear
+- style: Choose from Bold Title, Subtitle, Emphasis, Statistic, Question, Call-to-Action
+- purpose: Why this text appears here (1 sentence)
+- First overlay usually appears 0.5-1.0s in (after hook starts)
+- Emphasize numbers, questions, and key turning points
+- Avoid redundancy with voiceover (complement, don't duplicate)`;
+
+  const user = JSON.stringify({
+    style,
+    totalDuration,
+    targetCount,
+    hookText: hook.text,
+    emphasisPoints: emphasisPoints.map(ep => ({
+      time: ep.time,
+      text: ep.line.text,
+      hasQuestion: ep.hasQuestion,
+      hasNumber: ep.hasNumber
+    })),
+    scriptLines: lines.map(l => ({ time: l.start, text: l.text }))
+  });
+
+  try {
+    const outs = await callOpenAI({ system, user, n: 1, temperature: 0.60, maxTokens: 1800 });
+    const result = JSON.parse(outs[0]);
+    return result.textOverlays || [];
+  } catch (e) {
+    console.error('[Text Overlays Error]', e.message);
+    // Fallback: extract key phrases
+    const overlays = [];
+    overlays.push({ time: "0.5s", text: hook.text.split(/[,?.]/)[0].trim().split(' ').slice(0, 4).join(' '), style: "Bold Title", purpose: "Hook viewer" });
+    emphasisPoints.slice(0, targetCount - 1).forEach(ep => {
+      const words = ep.line.text.split(' ');
+      const short = words.slice(0, 5).join(' ');
+      overlays.push({ time: `${ep.time.toFixed(1)}s`, text: short, style: ep.hasQuestion ? "Question" : ep.hasNumber ? "Statistic" : "Emphasis", purpose: "Reinforce key point" });
+    });
+    return overlays;
+  }
+}
+
+/* -------- Generate Sound Effects -------- */
+async function generateSoundEffects(analysis, { style }) {
+  const { lines, totalDuration, transitionPoints, emphasisPoints, density, isMeme } = analysis;
+
+  let targetCount;
+  if (density === 'minimal') targetCount = 2;
+  else if (density === 'moderate') targetCount = 4;
+  else targetCount = 6;
+
+  const system = `You are a sound design specialist for short-form video.
+Generate sound effects that enhance pacing and emphasize key moments.
+
+RETURN JSON:
+{
+  "soundEffects": [
+    {"time": "0.0s", "effect": "...", "purpose": "..."},
+    ...
+  ]
+}
+
+RULES:
+- time format: "X.Xs"
+- effect: Name of sound (Swoosh, Pop, Ding, Boom, Click, Whoosh, Glitch, Record Scratch, etc.)
+- purpose: Why this sound fits here (1 sentence)
+- Opening sound at 0.0s is common
+- Align with transitions and emphasis points
+- Meme style: more frequent, playful sounds
+- Professional style: subtle, minimal sounds`;
+
+  const user = JSON.stringify({
+    style,
+    totalDuration,
+    targetCount,
+    isMeme,
+    transitionPoints: transitionPoints.map(tp => ({ time: tp.time, text: tp.line.text })),
+    emphasisPoints: emphasisPoints.map(ep => ({ time: ep.time, text: ep.line.text, hasQuestion: ep.hasQuestion }))
+  });
+
+  try {
+    const outs = await callOpenAI({ system, user, n: 1, temperature: 0.62, maxTokens: 1500 });
+    const result = JSON.parse(outs[0]);
+    return result.soundEffects || [];
+  } catch (e) {
+    console.error('[Sound Effects Error]', e.message);
+    // Fallback
+    const effects = [{ time: "0.0s", effect: "Swoosh", purpose: "Opening impact" }];
+    if (transitionPoints.length > 0) {
+      effects.push({ time: `${transitionPoints[0].time.toFixed(1)}s`, effect: "Pop", purpose: "Transition emphasis" });
+    }
+    if (emphasisPoints.length > 0) {
+      const mid = emphasisPoints[Math.floor(emphasisPoints.length / 2)];
+      effects.push({ time: `${mid.time.toFixed(1)}s`, effect: "Ding", purpose: "Key point highlight" });
+    }
+    return effects;
+  }
+}
+
+/* -------- Validate Package Consistency -------- */
+function validatePackageConsistency(pkg, totalDuration) {
+  const issues = [];
+
+  // Check transitions
+  pkg.transitions.forEach((t, i) => {
+    const time = parseFloat(t.time);
+    if (isNaN(time) || time < 0 || time > totalDuration) {
+      issues.push(`Transition ${i}: invalid time ${t.time}`);
+    }
+  });
+
+  // Check B-roll overlaps (some overlap OK, but not complete)
+  const brollRanges = pkg.bRoll.map(b => {
+    const [start, end] = b.timeRange.replace(/s/g, '').split('-').map(parseFloat);
+    return { start, end, content: b.content };
+  });
+  brollRanges.forEach((r1, i) => {
+    brollRanges.slice(i + 1).forEach((r2, j) => {
+      const overlap = Math.min(r1.end, r2.end) - Math.max(r1.start, r2.start);
+      const r1Duration = r1.end - r1.start;
+      const r2Duration = r2.end - r2.start;
+      if (overlap > Math.min(r1Duration, r2Duration) * 0.8) {
+        issues.push(`B-Roll overlap excessive: ${i} and ${i + j + 1}`);
+      }
+    });
+  });
+
+  // Check text overlays spacing (no closer than 0.5s)
+  const overlayTimes = pkg.textOverlays.map(t => parseFloat(t.time)).sort((a, b) => a - b);
+  overlayTimes.forEach((t, i) => {
+    if (i > 0 && t - overlayTimes[i - 1] < 0.5) {
+      issues.push(`Text overlays ${i - 1} and ${i} too close`);
+    }
+  });
+
+  if (issues.length > 0) {
+    console.warn('[Package Validation]', issues.join('; '));
+  }
+
+  return { valid: issues.length === 0, issues };
+}
+
+/* -------- Generate Complete Package (Main Function) -------- */
+async function generateCompletePackage({ timestampedScript, keyword, style, tone, duration }) {
+  try {
+    // 1. Analyze script structure
+    const analysis = analyzeScriptStructure(timestampedScript, { style, tone, duration });
+
+    // 2. Generate all elements in parallel (faster)
+    const [transitions, bRoll, textOverlays, soundEffects] = await Promise.all([
+      generateTransitions(analysis, { style, tone }),
+      generateBRoll(analysis, { style, tone, keyword }),
+      generateTextOverlays(analysis, { style }),
+      generateSoundEffects(analysis, { style })
+    ]);
+
+    const pkg = { transitions, bRoll, textOverlays, soundEffects };
+
+    // 3. Validate consistency
+    validatePackageConsistency(pkg, duration);
+
+    return pkg;
+
+  } catch (e) {
+    console.error('[Complete Package Error]', e.message);
+    // Return minimal fallback
+    return {
+      transitions: [
+        { time: "0.0s", type: "Fade In", description: "Opening", rationale: "Standard" },
+        { time: `${(duration - 1).toFixed(1)}s`, type: "Fade Out", description: "Closing", rationale: "Standard" }
+      ],
+      bRoll: [
+        { timeRange: `0.0-${(duration / 2).toFixed(1)}s`, content: "Opening visuals", purpose: "Establish context" },
+        { timeRange: `${(duration / 2).toFixed(1)}-${duration.toFixed(1)}s`, content: "Key demonstration", purpose: "Show concept" }
+      ],
+      textOverlays: [
+        { time: "0.5s", text: keyword, style: "Bold Title", purpose: "Topic identification" }
+      ],
+      soundEffects: [
+        { time: "0.0s", effect: "Swoosh", purpose: "Opening impact" }
+      ]
+    };
+  }
+}
+
+/* ==========================================================
+   🔥 Refinement Question Generation (Anti-repeat)
+   ========================================================== */
+
 const DIMENSIONS = [
   "audience", "goal", "methods", "structure", "count", "order", "detail",
   "hook", "tone", "length", "cta", "examples", "constraints", "platform",
@@ -401,7 +817,7 @@ function normalize(txt){
   return String(txt||"")
     .toLowerCase()
     .replace(/\s+/g, " ")
-    .replace(/[“”‘’\-—_]+/g, " ")
+    .replace(/[""''\-—_]+/g, " ")
     .replace(/[^a-z0-9가-힣 ?:%]/g, "")
     .trim();
 }
@@ -451,13 +867,12 @@ function dedupeOptions(opts){
   const out = [];
   for (const x of (opts||[])){
     const k = canonicalOption(x);
-    if (!k || k === "all levels") continue; // ban all-levels
+    if (!k || k === "all levels") continue;
     if (!seen.has(k)) { seen.add(k); out.push(x); }
   }
   return out.slice(0,4);
 }
 
-/* -------- 🔥 이미 물어본 것 명시적으로 추출 (강화 버전) -------- */
 function extractAskedTopics(conversationHistory) {
   const topics = new Set();
   (conversationHistory || []).forEach(item => {
@@ -471,7 +886,6 @@ function extractAskedTopics(conversationHistory) {
   return Array.from(topics);
 }
 
-/* -------- 🔥 명시적으로 차단하는 질문 생성 (강화 버전) -------- */
 async function generateRefinementQuestion({ 
   baseScript, 
   conversationHistory, 
@@ -481,7 +895,6 @@ async function generateRefinementQuestion({
   tone, 
   language 
 }) {
-  // guard: too long
   if (conversationHistory && conversationHistory.length >= 8) {
     return { question: null, options: [] };
   }
@@ -489,13 +902,12 @@ async function generateRefinementQuestion({
   const isFirstQuestion = !conversationHistory || conversationHistory.length === 0;
   const askedDims = new Set(extractAskedTopics(conversationHistory));
   const banned = new Set(askedDims);
-  // Prevent exact same dim back-to-back: also ban the last asked dimension
   const lastEntry = (conversationHistory||[]).slice().reverse().find(x=>x?.question || x?.message);
   const lastDim = lastEntry ? detectDimension(lastEntry.question || lastEntry.message || "") : null;
   if (lastDim) banned.add(lastDim);
 
   const allowed = DIMENSIONS.filter(d => !banned.has(d));
-  const allowedList = allowed.length ? allowed : DIMENSIONS.slice(); // fallback if everything banned
+  const allowedList = allowed.length ? allowed : DIMENSIONS.slice();
 
   const system = `You are a script refinement assistant. Ask ONE strategic question to improve the video script.
 Return strict JSON: { "question": "...", "options": ["opt1","opt2","opt3","opt4"], "dimension": "one_of_${DIMENSIONS.join("|")}" }
@@ -535,7 +947,6 @@ Rules:
       ]
     };
 
-    // Slight nudge examples without audience repetition
     const goodFirst = [
       'How many main points should we cover?',
       'What\'s the primary goal?',
@@ -549,7 +960,6 @@ Rules:
     return JSON.stringify(base);
   }
 
-  // Try generate with validation up to 2 attempts
   const attempts = 2;
   let lastParsed = null;
   for (let i=0; i<attempts; i++){
@@ -558,7 +968,7 @@ Rules:
         system, 
         user: buildUser(isFirstQuestion), 
         n: 1, 
-        temperature: 0.55 // lower variance for stability
+        temperature: 0.55
       });
       const obj = JSON.parse(outs[0] || '{}');
       lastParsed = obj;
@@ -566,13 +976,10 @@ Rules:
       let options = Array.isArray(obj?.options)? obj.options : [];
       const dim = obj?.dimension || detectDimension(q);
 
-      // Validate dimension
       const dimOk = dim && allowedList.includes(dim) && !banned.has(dim);
 
-      // Dedupe & sanitize options
       options = dedupeOptions(options);
       if (options.length < 3) {
-        // try to repair by adding generic but distinct placeholders per dimension
         const fillersByDim = {
           audience: ["Beginners","Intermediate","Advanced","Freelancers"],
           goal: ["Action","Education","Inspiration","Case study"],
@@ -605,13 +1012,11 @@ Rules:
       if (q && options.length >= 3 && !hasDup && dimOk && !looksAudienceRepeat) {
         return { question: q, options };
       }
-      // else fall-through to retry
     } catch (e) {
-      // ignore and retry
+      // retry
     }
   }
 
-  // Deterministic fallback: pick next unused dimension by priority
   const pick = DIMENSION_PRIORITY.find(d => !banned.has(d)) || 'goal';
   const templates = {
     audience: { q: "Who should we target?", o: ["Beginners","Intermediate","Advanced","Freelancers"] },
@@ -639,7 +1044,10 @@ Rules:
   return { question: fallback.q, options: fallback.o };
 }
 
-/* -------- Phase별 처리 로직 -------- */
+/* ==========================================================
+   Phase Handlers
+   ========================================================== */
+
 async function handleInitialPhase({ text, language, duration, tone, style }) {
   const system = buildSystemPrompt(language, text);
   const user = buildUserPrompt({ text, language, duration, tone, style });
@@ -771,29 +1179,32 @@ async function handleFinalPhase(body) {
 
   let result;
   if (outputType === "complete") {
-    const scriptText = timestamps
-      ? allocateDurationsByWords(best.lines, durationSec)
-      : best.lines.join("\n");
+    // Generate timestamped script first
+    const timestampedScript = allocateDurationsByWords(best.lines, durationSec);
+    
+    // Generate complete package with AI
+    const completePackage = await generateCompletePackage({
+      timestampedScript,
+      keyword: text,
+      style,
+      tone,
+      duration: durationSec
+    });
+
+    // Format script with timestamps
+    const scriptText = timestampedScript.map(item => 
+      `[${item.start.toFixed(1)}-${item.end.toFixed(1)}] ${item.text}`
+    ).join('\n');
 
     result = {
       script: scriptText,
-      transitions: [
-        { time: "0.0s", type: "Fade In", description: "Opening transition" },
-        { time: `${(durationSec/2).toFixed(1)}s`, type: "Quick Cut", description: "Mid-point emphasis" }
-      ],
-      bRoll: [
-        { timeRange: `0.0-${(durationSec/3).toFixed(1)}s`, content: "Relevant B-roll footage" }
-      ],
-      textOverlays: [
-        { time: "0.5s", text: text, style: "Bold Title" }
-      ],
-      soundEffects: [
-        { time: "0.0s", effect: "Swoosh" }
-      ]
+      ...completePackage
     };
   } else {
     result = timestamps
-      ? allocateDurationsByWords(best.lines, durationSec)
+      ? allocateDurationsByWords(best.lines, durationSec).map(item => 
+          `[${item.start.toFixed(1)}-${item.end.toFixed(1)}] ${item.text}`
+        ).join('\n')
       : best.lines.join("\n");
   }
 
