@@ -973,7 +973,22 @@ Rules:
       const obj = JSON.parse(outs[0] || '{}');
       lastParsed = obj;
       let q = (obj?.question||"").trim();
+      
+      // ✅ 추가: undefined, null 문자열 제거 및 공백 정리
+      q = q.replace(/undefined/gi, "").replace(/null/gi, "").replace(/\s+/g, " ").trim();
+
+      // null 체크 강화
+      if (!q) {
+        throw new Error("Empty question after cleaning");
+      }
+
       let options = Array.isArray(obj?.options)? obj.options : [];
+      
+      // ✅ options도 정리
+      options = options.map(opt => 
+        String(opt).replace(/undefined/gi, "").replace(/null/gi, "").trim()
+      ).filter(Boolean);
+
       const dim = obj?.dimension || detectDimension(q);
 
       const dimOk = dim && allowedList.includes(dim) && !banned.has(dim);
